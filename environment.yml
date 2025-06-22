@@ -1,0 +1,15 @@
+name: thesis_env
+channels:
+  - defaults
+  - pytorch
+dependencies:
+  - python=3.10
+  - pandas
+  - numpy
+  - matplotlib
+  - seaborn
+  - scikit-learn
+  - jupyter
+  - pytorch
+  - torchvision
+  - torchaudio
