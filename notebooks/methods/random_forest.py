@@ -1,12 +1,9 @@
-# methods/random_forest.py
-
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import f1_score
 from sklearn.model_selection import GridSearchCV
 
-def run_random_forest(X_train, y_train, X_test, y_test, rng, iteration,  randomState, X_columns=None):
-
+def run_random_forest(X_train, y_train, X_test, y_test, rng, iteration, randomState, X_columns=None):
     # Hyperparameter-Tuning
     param_grid = {'n_estimators': [100, 200, 300]}
     grid = GridSearchCV(
@@ -20,6 +17,7 @@ def run_random_forest(X_train, y_train, X_test, y_test, rng, iteration,  randomS
 
     best_model = grid.best_estimator_
     y_probs    = best_model.predict_proba(X_test)[:, 1]
+    importances = best_model.feature_importances_
 
     # Threshold-Optimierung
     thresholds = np.linspace(0, 1, 100)
@@ -29,13 +27,19 @@ def run_random_forest(X_train, y_train, X_test, y_test, rng, iteration,  randomS
     best_f1    = f1_scores[best_idx]
     y_pred     = (y_probs >= best_threshold).astype(int)
 
+    # Feature Importances
+    importances = best_model.feature_importances_
+    selected = [X_columns[i] for i, imp in enumerate(importances) if imp > 0] \
+        if X_columns is not None else []
+
     return {
         'model_name':         'RandomForest',
-        'iteration':   iteration,
+        'iteration':          iteration,
         'best_params':        grid.best_params_,
         'best_threshold':     best_threshold,
         'best_f1':            best_f1,
         'y_pred':             y_pred.tolist(),
         'y_prob':             y_probs.tolist(),
-        'feature_importances': best_model.feature_importances_.tolist()
+        'feature_importances': importances.tolist(),
+        'selected_features':  selected
     }

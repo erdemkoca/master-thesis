@@ -3,6 +3,7 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import GridSearchCV
 from sklearn.metrics import f1_score
+from sklearn.metrics import precision_score, recall_score
 
 def run_lasso(X_train, y_train, X_test, y_test, rng, iteration, randomState, X_columns):
 
@@ -38,6 +39,8 @@ def run_lasso(X_train, y_train, X_test, y_test, rng, iteration, randomState, X_c
     best_threshold = thresholds[best_idx]
     best_f1    = f1_scores[best_idx]
     y_pred     = (y_probs >= best_threshold).astype(int)
+    precision = precision_score(y_test, y_pred, zero_division=0)
+    recall = recall_score(y_test, y_pred, zero_division=0)
 
     # Ausgewählte Features
     coefs = best_model.coef_.flatten()
@@ -50,6 +53,8 @@ def run_lasso(X_train, y_train, X_test, y_test, rng, iteration, randomState, X_c
         'best_threshold': best_threshold,
         'y_pred': y_pred,
         'y_prob': y_probs,
+        'precision': precision,
+        'recall': recall,
         'selected_features': selected_features,
         'lasso_C': clf.best_params_['C'],
         'lasso_coefs': best_model.coef_.flatten().tolist()
