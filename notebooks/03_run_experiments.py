@@ -5,6 +5,7 @@ from methods.lasso_Net import run_lassonet
 from methods.random_forest import run_random_forest
 from methods.nimo import run_nimo
 from methods.neural_net import run_neural_net
+from methods.run_nimo_official import run_nimo_official
 import os
 import json
 
@@ -53,10 +54,11 @@ for iteration in range(20):
     # Methoden
     methods = [
         run_lasso,
-        run_lassonet,
+        #run_lassonet,
         run_random_forest,
         run_neural_net,
-        run_nimo
+        run_nimo,
+        run_nimo_official
     ]
 
     randomState = int(rng.integers(0, 2**32 - 1))
