@@ -56,6 +56,8 @@ def run_lasso(X_train, y_train, X_test, y_test, rng, iteration, randomState, X_c
         'precision': precision,
         'recall': recall,
         'selected_features': selected_features,
+        'method_has_selection': True,
+        'n_selected': len(selected_features),
         'lasso_C': clf.best_params_['C'],
         'lasso_coefs': best_model.coef_.flatten().tolist()
     }

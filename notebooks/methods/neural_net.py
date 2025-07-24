@@ -97,6 +97,15 @@ def run_neural_net(X_train, y_train, X_test, y_test, rng, iteration, randomState
 
     print(f"[NeuralNet] seed={randomState}, hidden={best_params['hidden_dim']}, dropout={best_params['dropout_rate']}")
 
+    # Feature selection based on first layer weights
+    if X_columns is not None:
+        # Calculate feature importance based on first layer weights
+        first_layer_weights = model.fc1.weight.data.abs().mean(dim=0).numpy()
+        weight_threshold = 0.01
+        selected_features = [X_columns[i] for i, weight in enumerate(first_layer_weights) if weight > weight_threshold]
+    else:
+        selected_features = []
+
     return {
         'model_name':       'NeuralNet',
         'iteration':   iteration,
@@ -104,7 +113,9 @@ def run_neural_net(X_train, y_train, X_test, y_test, rng, iteration, randomState
         'best_f1':          best_f1,
         'y_pred':           y_pred.tolist(),
         'y_prob':           probs.tolist(),
-        'selected_features': X_columns or [],
+        'selected_features': selected_features,
+        'method_has_selection': False,
+        'n_selected': len(selected_features),
         'hidden_size':      best_params['hidden_dim'],
         'dropout':          best_params['dropout_rate']
     }

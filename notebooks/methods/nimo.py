@@ -146,6 +146,14 @@ def run_nimo(
     f1_scores  = [f1_score(y_test, (probs >= t).astype(int)) for t in thresholds]
     best_idx   = int(np.argmax(f1_scores))
 
+    # Feature selection based on beta coefficients
+    beta_coeffs = model.beta.data.cpu().numpy()[1:]  # Skip intercept
+    beta_threshold = 0.01
+    if X_columns is not None:
+        selected_features = [X_columns[i] for i, beta in enumerate(beta_coeffs) if abs(beta) > beta_threshold]
+    else:
+        selected_features = [i for i, beta in enumerate(beta_coeffs) if abs(beta) > beta_threshold]
+
     return {
         'model_name':      'nimo',
         'iteration':       iteration,
@@ -153,7 +161,9 @@ def run_nimo(
         'best_f1':         f1_scores[best_idx],
         'y_pred':          (probs >= thresholds[best_idx]).astype(int).tolist(),
         'y_prob':          probs.tolist(),
-        'selected_features': X_columns if X_columns else list(range(d)),
+        'selected_features': selected_features,
+        'method_has_selection': True,
+        'n_selected': len(selected_features),
         'hidden_dim':      hidden_dim,
         'pe_dim':          pe_dim
     }

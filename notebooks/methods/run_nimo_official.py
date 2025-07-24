@@ -93,6 +93,14 @@ def run_nimo_official(
     best_idx = int(np.argmax(f1s))
     best_thr = thresholds[best_idx]
 
+    # Feature selection based on beta coefficients
+    beta_coeffs = model.beta.data.cpu().numpy()[1:]  # Skip intercept
+    beta_threshold = 0.01
+    if X_columns is not None:
+        selected_features = [X_columns[i] for i, beta in enumerate(beta_coeffs) if abs(beta) > beta_threshold]
+    else:
+        selected_features = [i for i, beta in enumerate(beta_coeffs) if abs(beta) > beta_threshold]
+
     return {
       'model_name':      'nimo_official',
       'iteration':       iteration,
@@ -100,8 +108,9 @@ def run_nimo_official(
       'best_f1':         float(f1s[best_idx]),
       'y_pred':          (probs>=best_thr).astype(int).tolist(),
       'y_prob':          probs.tolist(),
-      # NIMO wählt alle Features, die β≠0 haben; hier liefern wir einfach alle Spalten-Indices
-      'selected_features': X_columns if X_columns is not None else list(range(X_train.shape[1])),
+      'selected_features': selected_features,
+      'method_has_selection': True,
+      'n_selected': len(selected_features),
       # zum Debug: hyperparams
       'hp': {
         'epochs': max_epochs,

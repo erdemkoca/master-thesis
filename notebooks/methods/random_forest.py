@@ -27,9 +27,10 @@ def run_random_forest(X_train, y_train, X_test, y_test, rng, iteration, randomSt
     best_f1    = f1_scores[best_idx]
     y_pred     = (y_probs >= best_threshold).astype(int)
 
-    # Feature Importances
+    # Feature Importances - use threshold-based selection
     importances = best_model.feature_importances_
-    selected = [X_columns[i] for i, imp in enumerate(importances) if imp > 0] \
+    importance_threshold = 0.01
+    selected_features = [X_columns[i] for i, imp in enumerate(importances) if imp > importance_threshold] \
         if X_columns is not None else []
 
     return {
@@ -41,5 +42,7 @@ def run_random_forest(X_train, y_train, X_test, y_test, rng, iteration, randomSt
         'y_pred':             y_pred.tolist(),
         'y_prob':             y_probs.tolist(),
         'feature_importances': importances.tolist(),
-        'selected_features':  selected
+        'selected_features':  selected_features,
+        'method_has_selection': False,
+        'n_selected': len(selected_features)
     }

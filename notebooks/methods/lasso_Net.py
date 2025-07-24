@@ -42,6 +42,8 @@ def run_lassonet(X_train, y_train, X_test, y_test, rng, iteration, randomState, 
         'y_pred':          y_pred,
         'y_prob':          y_probs,
         'selected_features': selected_features,
+        'method_has_selection': True,
+        'n_selected': len(selected_features),
         'best_lambda':     getattr(model, 'best_lambda_', None),
         'best_cv_score':   getattr(model, 'best_cv_score_', None)
     }
