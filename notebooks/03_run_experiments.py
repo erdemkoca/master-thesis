@@ -3,9 +3,9 @@ import pandas as pd
 from methods.lasso import run_lasso
 from methods.lasso_Net import run_lassonet
 from methods.random_forest import run_random_forest
-from methods.nimo import run_nimo
 from methods.neural_net import run_neural_net
-from methods.run_nimo_official import run_nimo_official
+from methods.nimo_variants.baseline import run_nimo_baseline
+from methods.nimo_variants.variant import run_nimo_variant
 import os
 import json
 
@@ -54,11 +54,11 @@ for iteration in range(20):
     # Methoden
     methods = [
         run_lasso,
-        #run_lassonet,
+        run_lassonet,
         run_random_forest,
         run_neural_net,
-        run_nimo,
-        run_nimo_official
+        run_nimo_baseline,
+        run_nimo_variant
     ]
 
     randomState = int(rng.integers(0, 2**32 - 1))
