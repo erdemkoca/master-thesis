@@ -8,8 +8,9 @@ import lightning as L
 import numpy as np
 import torch.nn.functional as F
 
+
 def to_bin(x, n_bits):
-    return np.array([int(b) for b in format(x, f'0{n_bits}b')]) - 0.5   # -0.5 to make it -0.5 and 0.5
+    return np.array([int(b) for b in format(x, f'0{n_bits}b')]) - 0.5  # -0.5 to make it -0.5 and 0.5
 
 
 class AdaptiveRidgeLogisticRegression(L.LightningModule):
@@ -156,8 +157,9 @@ class AdaptiveRidgeLogisticRegression(L.LightningModule):
         return loss  
     
     def on_train_batch_end(self, outputs, batch, batch_idx):
-        self.logger.experiment.add_histogram('beta', self.beta, global_step=self.global_step)
-        self.logger.experiment.add_histogram('c', self.c, global_step=self.global_step)
+        if self.logger is not None:
+            self.logger.experiment.add_histogram('beta', self.beta, global_step=self.global_step)
+            self.logger.experiment.add_histogram('c', self.c, global_step=self.global_step)
         self.log('beta_0', self.beta_0, on_epoch=True, prog_bar=True)
         self.log('alpha2', self.alpha2, on_epoch=True, prog_bar=True)
     
@@ -205,8 +207,7 @@ class AdaptiveRidgeLogisticRegression(L.LightningModule):
         acc = (pred == y).float().mean()
         print(f"Predict ACC: {acc}")
         return pred
-        
-    
+
     def custom_prediction(self, x):
         B_u = self.build_B_u(x)
         y_hat = self.forward(B_u)
