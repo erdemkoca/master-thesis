@@ -394,7 +394,7 @@ def split_data(X, y, test_size=0.3, seed=42):
 
 # Main experiment loop
 all_results = []
-n_iterations = 5
+n_iterations = 20
 
 print("="*60)
 print("SYNTHETIC DATA EXPERIMENT RUNNER")
