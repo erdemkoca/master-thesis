@@ -1,3 +1,7 @@
+"""
+NIMO Variant - Original NIMO Implementation
+"""
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -56,7 +60,7 @@ class NIMO(nn.Module):
         return self.forward(x).matmul(self.beta.unsqueeze(1)).squeeze(1)
 
 
-def run_nimo(
+def run_nimo_variant(
     X_train, y_train, X_test, y_test,
     rng, iteration, randomState, X_columns=None,
     *,  # alle folgenden args nur per keyword
@@ -69,7 +73,7 @@ def run_nimo(
     T=10
 ):
     """
-    Trainings‐Routine für NIMO mit IRLS‐Loop + Profil‐Likelihood.
+    NIMO Variant - Original NIMO Implementation with IRLS‐Loop + Profil‐Likelihood.
     hyperparams: hidden_dim, pe_dim, lam, noise_std, group_reg, lr, T
     """
     device = torch.device('cpu')
@@ -155,7 +159,7 @@ def run_nimo(
         selected_features = [i for i, beta in enumerate(beta_coeffs) if abs(beta) > beta_threshold]
 
     return {
-        'model_name':      'nimo',
+        'model_name':      'nimo_variant',
         'iteration':       iteration,
         'best_threshold':  thresholds[best_idx],
         'best_f1':         f1_scores[best_idx],
@@ -166,4 +170,4 @@ def run_nimo(
         'n_selected': len(selected_features),
         'hidden_dim':      hidden_dim,
         'pe_dim':          pe_dim
-    }
+    } 

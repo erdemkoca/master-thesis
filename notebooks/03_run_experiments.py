@@ -9,6 +9,8 @@ from methods.nimo_variants.variant import run_nimo_variant
 import os
 import json
 
+from notebooks.methods.nimo_variants.nimoNew import run_nimoNew
+
 # Load split data
 print("Loading data...")
 X_train = np.load("../data/splits/X_train.npy")
@@ -53,12 +55,13 @@ for iteration in range(20):
 
     # Methoden
     methods = [
-        run_lasso,
-        run_lassonet,
-        run_random_forest,
-        run_neural_net,
-        run_nimo_baseline,
-        run_nimo_variant
+        # run_lasso,
+        # run_lassonet,
+        # run_random_forest,
+        # run_neural_net,
+        # run_nimo_baseline,
+        run_nimo_variant,
+        run_nimoNew
     ]
 
     randomState = int(rng.integers(0, 2**32 - 1))
