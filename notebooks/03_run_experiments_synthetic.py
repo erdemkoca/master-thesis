@@ -29,57 +29,96 @@ os.makedirs("../results/synthetic/convergence/", exist_ok=True)
 
 # 1) Define scenarios with detailed descriptions
 scenarios = {
-    'A': { 
-        'n_samples': 200, 
-        'n_features': 20, 
-        'n_true_features': 5, 
-        'interactions': None, 
-        'nonlinear': None, 
-        'rho': 0.0, 
+    'A': {
+        'n_samples': 200,
+        'n_features': 20,
+        'n_true_features': 5,
+        'interactions': None,
+        'nonlinear': None,
+        'rho': 0.0,
         'noise': 'gaussian',
-        'description': 'Basic linear model with independent features'
+        'description':       'Independent linear',
+        'description_long':  'Basic linear model with independent features'
     },
-    'B': { 
-        'n_samples': 200, 
-        'n_features': 20, 
-        'n_true_features': 5, 
-        'interactions': [(0,1), (2,3)], 
-        'nonlinear': None, 
-        'rho': 0.0, 
+    'B': {
+        'n_samples': 200,
+        'n_features': 20,
+        'n_true_features': 5,
+        'interactions': [(0,1), (2,3)],
+        'nonlinear': None,
+        'rho': 0.0,
         'noise': 'gaussian',
-        'description': 'Linear model with feature interactions'
+        'description':       'Feature interactions',
+        'description_long':  'Linear model with feature interactions'
     },
-    'C': { 
-        'n_samples': 200, 
-        'n_features': 20, 
-        'n_true_features': 5, 
-        'interactions': None, 
-        'nonlinear': [('sin', 3), ('square', 6)], 
-        'rho': 0.0, 
+    'C': {
+        'n_samples': 200,
+        'n_features': 20,
+        'n_true_features': 5,
+        'interactions': None,
+        'nonlinear': [('sin', 3), ('square', 6)],
+        'rho': 0.0,
         'noise': 'gaussian',
-        'description': 'Linear model with nonlinear transformations'
+        'description':       'Nonlinear terms',
+        'description_long':  'Linear model with nonlinear transformations'
     },
-    'D': { 
-        'n_samples': 200, 
-        'n_features': 20, 
-        'n_true_features': 5, 
-        'interactions': [(0,1)], 
-        'nonlinear': [('sin', 2)], 
-        'rho': 0.8, 
+    'D': {
+        'n_samples': 200,
+        'n_features': 20,
+        'n_true_features': 5,
+        'interactions': [(0,1)],
+        'nonlinear': [('sin', 2)],
+        'rho': 0.8,
         'noise': 'gaussian',
-        'description': 'Complex model with interactions, nonlinear terms, and correlated features'
+        'description':       'Interactions + corr.',
+        'description_long':  'Complex model w/ interactions, nonlinear terms, and correlated features'
     },
-    'E': { 
-        'n_samples': 200, 
-        'n_features': 20, 
-        'n_true_features': 5, 
-        'interactions': [(0,1)], 
-        'nonlinear': None, 
-        'rho': 0.0, 
+    'E': {
+        'n_samples': 200,
+        'n_features': 20,
+        'n_true_features': 5,
+        'interactions': [(0,1)],
+        'nonlinear': None,
+        'rho': 0.0,
         'noise': 'student_t',
-        'description': 'Linear model with heavy-tailed noise'
+        'description':       'Heavy‑tailed noise',
+        'description_long':  'Linear model with heavy‑tailed (Student‑t) noise'
+    },
+    'F': {
+        'n_samples': 300,
+        'n_features': 20,
+        'n_true_features': 5,
+        'interactions': None,
+        'nonlinear': [('sin', i) for i in range(5)],
+        'rho': 0.0,
+        'noise': 'gaussian',
+        'description':       'High‑freq sin',
+        'description_long':  'Signal = Σ coeff_i · sin(x_i), pure Gaussian noise'
+    },
+    'G': {
+        'n_samples': 500,
+        'n_features': 10,
+        'n_true_features': 2,
+        'interactions': [(0,1), (2,3)],
+        'nonlinear': None,
+        'rho': 0.0,
+        'noise': 'gaussian',
+        'description':       'XOR interactions',
+        'description_long':  'Signal = x₀⊕x₁ + x₂⊕x₃ + Gaussian noise'
+    },
+    'H': {
+        'n_samples': 300,
+        'n_features': 15,
+        'n_true_features': 3,
+        'interactions': None,
+        'nonlinear': [('square', 0), ('cube', 1)],
+        'rho': 0.9,
+        'noise': 'gaussian',
+        'description':       'Polynom + corr.',
+        'description_long':  'ρ=0.9, Signal = β₀ x₀² + β₁ x₁³ + Gaussian noise'
     },
 }
+
 
 
 
@@ -259,7 +298,7 @@ def split_data(X, y, test_size=0.3, seed=42):
 
 # Main experiment loop
 all_results = []
-n_iterations = 10
+n_iterations = 5
 
 print("="*60)
 print("SYNTHETIC DATA EXPERIMENT RUNNER")
@@ -290,7 +329,11 @@ for scenario_name, params in scenarios.items():
     
     # Generate data for this scenario
     # Remove description from params for function call
-    data_params = {k: v for k, v in params.items() if k != 'description'}
+    data_params = {
+        k: v
+        for k, v in params.items()
+        if not k.startswith('description')
+    }
     X_full, y_full, true_support, beta_true = generate_synthetic_data(**data_params)
     X_train, y_train, X_test, y_test = split_data(X_full, y_full, test_size=0.3, seed=42)
     
@@ -358,6 +401,8 @@ for scenario_name, params in scenarios.items():
                 # Convert metadata to native types before adding
                 metadata = {
                     'scenario': scenario_name,
+                    'scenario_short': params['description'],
+                    'scenario_long': params.get('description_long', params['description']),
                     'scenario_description': scenario_description,
                     'rho': float(params['rho']),
                     'noise_type': params['noise'],
