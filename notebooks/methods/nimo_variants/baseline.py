@@ -9,6 +9,28 @@ import numpy as np
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from sklearn.metrics import f1_score
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    from utils import standardize_method_output
+except ImportError as e:
+    print(f"Import error in baseline.py: {e}")
+    # Fallback: define a simple version
+    def standardize_method_output(result):
+        # Simple conversion to native types
+        import numpy as np
+        converted = {}
+        for k, v in result.items():
+            if isinstance(v, np.ndarray):
+                converted[k] = v.tolist()
+            elif isinstance(v, (np.integer, np.int64, np.int32, np.int16, np.int8)):
+                converted[k] = int(v)
+            elif isinstance(v, (np.floating, np.float64, np.float32, np.float16)):
+                converted[k] = float(v)
+            else:
+                converted[k] = v
+        return converted
 
 
 def to_bin(x, n_bits):
@@ -315,7 +337,7 @@ def run_nimo_baseline(
     else:
         selected_features = [i for i, beta in enumerate(beta_coeffs) if abs(beta) > beta_threshold]
 
-    return {
+    result = {
       'model_name':      'nimo_baseline',
       'iteration':       iteration,
       'best_threshold':  float(best_thr),
@@ -333,4 +355,6 @@ def run_nimo_baseline(
         'lasso_pen': lasso_penalty,
         'group_pen': group_penalty
       }
-    } 
+    }
+    
+    return standardize_method_output(result) 

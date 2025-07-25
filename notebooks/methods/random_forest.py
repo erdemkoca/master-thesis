@@ -2,6 +2,28 @@ import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import f1_score
 from sklearn.model_selection import GridSearchCV
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+try:
+    from utils import standardize_method_output
+except ImportError as e:
+    print(f"Import error in random_forest.py: {e}")
+    # Fallback: define a simple version
+    def standardize_method_output(result):
+        # Simple conversion to native types
+        import numpy as np
+        converted = {}
+        for k, v in result.items():
+            if isinstance(v, np.ndarray):
+                converted[k] = v.tolist()
+            elif isinstance(v, (np.integer, np.int64, np.int32, np.int16, np.int8)):
+                converted[k] = int(v)
+            elif isinstance(v, (np.floating, np.float64, np.float32, np.float16)):
+                converted[k] = float(v)
+            else:
+                converted[k] = v
+        return converted
 
 def run_random_forest(X_train, y_train, X_test, y_test, rng, iteration, randomState, X_columns=None):
     # Hyperparameter-Tuning
@@ -33,7 +55,7 @@ def run_random_forest(X_train, y_train, X_test, y_test, rng, iteration, randomSt
     selected_features = [X_columns[i] for i, imp in enumerate(importances) if imp > importance_threshold] \
         if X_columns is not None else []
 
-    return {
+    result = {
         'model_name':         'RandomForest',
         'iteration':          iteration,
         'best_params':        grid.best_params_,
@@ -46,3 +68,5 @@ def run_random_forest(X_train, y_train, X_test, y_test, rng, iteration, randomSt
         'method_has_selection': False,
         'n_selected': len(selected_features)
     }
+    
+    return standardize_method_output(result)

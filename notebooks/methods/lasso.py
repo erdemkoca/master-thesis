@@ -4,6 +4,28 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import GridSearchCV
 from sklearn.metrics import f1_score
 from sklearn.metrics import precision_score, recall_score
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+try:
+    from utils import standardize_method_output
+except ImportError as e:
+    print(f"Import error in lasso.py: {e}")
+    # Fallback: define a simple version
+    def standardize_method_output(result):
+        # Simple conversion to native types
+        import numpy as np
+        converted = {}
+        for k, v in result.items():
+            if isinstance(v, np.ndarray):
+                converted[k] = v.tolist()
+            elif isinstance(v, (np.integer, np.int64, np.int32, np.int16, np.int8)):
+                converted[k] = int(v)
+            elif isinstance(v, (np.floating, np.float64, np.float32, np.float16)):
+                converted[k] = float(v)
+            else:
+                converted[k] = v
+        return converted
 
 def run_lasso(X_train, y_train, X_test, y_test, rng, iteration, randomState, X_columns):
 
@@ -46,13 +68,13 @@ def run_lasso(X_train, y_train, X_test, y_test, rng, iteration, randomState, X_c
     coefs = best_model.coef_.flatten()
     selected_features = [X_columns[i] for i, c in enumerate(coefs) if c != 0]
 
-    return {
+    result = {
         'model_name': 'lasso',
         'iteration':   iteration,
         'best_f1': best_f1,
         'best_threshold': best_threshold,
-        'y_pred': y_pred,
-        'y_prob': y_probs,
+        'y_pred': y_pred.tolist(),
+        'y_prob': y_probs.tolist(),
         'precision': precision,
         'recall': recall,
         'selected_features': selected_features,
@@ -61,3 +83,5 @@ def run_lasso(X_train, y_train, X_test, y_test, rng, iteration, randomState, X_c
         'lasso_C': clf.best_params_['C'],
         'lasso_coefs': best_model.coef_.flatten().tolist()
     }
+    
+    return standardize_method_output(result)
