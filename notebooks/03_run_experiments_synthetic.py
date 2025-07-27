@@ -406,8 +406,8 @@ print()
 # Define methods to run
 methods = [
     run_lasso,
-    #run_lassonet,
-    # run_random_forest,  # Commented out for speed
+    run_lassonet,
+    run_random_forest,
     run_neural_net,
     run_nimo_baseline,
     run_nimo_variant,
