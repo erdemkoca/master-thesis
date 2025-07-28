@@ -20,6 +20,8 @@ from methods.nimo_variants.baseline import run_nimo_baseline
 from methods.nimo_variants.variant import run_nimo_variant
 from methods.nimo_variants.nimoNew import run_nimoNew
 from methods.utils import to_native, standardize_method_output
+from methods.neural_net2 import run_neural_net2
+
 
 # Create results directories
 os.makedirs("../results/synthetic/", exist_ok=True)
@@ -53,25 +55,29 @@ scenarios = {
     },
     'C': {
         'n_samples': 200,
-        'n_features': 20,
-        'n_true_features': 5,
+        'n_features': 25,
+        'n_true_features': 0,
         'interactions': None,
-        'nonlinear': [('sin', 3), ('square', 6)],
+        'nonlinear': (
+            [('sin', i) for i in range(5)]
+          + [('square', i) for i in range(5,10)]
+          + [('cube', i) for i in range(10,15)]
+        ),
         'rho': 0.0,
         'noise': 'gaussian',
-        'description':       'Nonlinear terms',
-        'description_long':  'Linear model with nonlinear transformations'
+        'description':      'Pure nonlinear',
+        'description_long': 'No linear β·X. 5×sin(X), 5×X², 5×X³ + Gaussian noise'
     },
     'D': {
-        'n_samples': 200,
+        'n_samples': 100,
         'n_features': 20,
         'n_true_features': 5,
-        'interactions': [(0,1)],
+        'interactions': [(0,1), (2,3), (4,5,6)],
         'nonlinear': [('sin', 2)],
-        'rho': 0.8,
-        'noise': 'gaussian',
-        'description':       'Interactions + corr.',
-        'description_long':  'Complex model w/ interactions, nonlinear terms, and correlated features'
+        'rho': 0.95,
+        'noise': 'gaussian_heavy',
+        'description':       'Hard Interactions + corr.',
+        'description_long':  'Complex model w/ interactions, ρ=0.95, two interactions + 3‑way, heavy noise '
     },
     'E': {
         'n_samples': 200,
@@ -86,14 +92,20 @@ scenarios = {
     },
     'F': {
         'n_samples': 300,
-        'n_features': 20,
+        'n_features': 20,           # hier ziehen wir 20 rohe X
         'n_true_features': 5,
         'interactions': None,
-        'nonlinear': [('sin', i) for i in range(5)],
+        'nonlinear': [ # Wir hängen 5 sehr hochfrequente Sinus‑Basisfunktionen an
+            ('sin_highfreq', k, freq)
+            for k, freq in zip(range(5), [5, 7, 9, 11, 13])
+        ],
         'rho': 0.0,
-        'noise': 'gaussian',
-        'description':       'High‑freq sin',
-        'description_long':  'Signal = Σ coeff_i · sin(x_i), pure Gaussian noise'
+        'noise': 'gaussian_heavy',
+        'description':       'High‑freq sin (hidden)',
+        'description_long':  (
+            'Draw X ~ N(0,I), then add 5 columns sin(freq·X_k) '
+            'with frequencies [5,7,9,11,13] + heavy Gaussian noise'
+        )
     },
     'G': {
         'n_samples': 500,
@@ -130,7 +142,7 @@ scenarios = {
         'description_long': 'y = sigmoid( exp(-||x - mu||^2 / sigma^2) ) + noise'
     },
     'J': {
-        'n_samples': 400,
+        'n_samples': 800,
         'n_features': 15,
         'n_true_features': 5,
         'interactions': None,
@@ -141,7 +153,7 @@ scenarios = {
         'description_long': 'y = sawtooth(x_k) + sum_sin(...) + noise'
     },
     'K': {
-        'n_samples': 500,
+        'n_samples': 2000,
         'n_features': 12,
         'n_true_features': 4,
         'interactions': [(0,1,2), (3,4,5)],  # 3-way interactions
@@ -153,7 +165,7 @@ scenarios = {
     },
     'L': {
         'n_samples': 50,
-        'n_features': 200,
+        'n_features': 500,
         'n_true_features': 10,
         'interactions': None,
         'nonlinear': [('sin', i) for i in range(10)],
@@ -263,120 +275,149 @@ def calculate_support_recovery_metrics(selected_features, true_support, n_featur
         'f1_recovery': f1_recovery
     }
 
-def generate_synthetic_data(n_samples=200, n_features=20, n_true_features=5, 
-                          interactions=None, nonlinear=None, rho=0.0, 
-                          noise='gaussian', custom=None, seed=42):
+
+import numpy as np
+from scipy.stats import multivariate_normal, t
+from scipy.special import expit
+
+def generate_synthetic_data(n_samples=200, n_features=20, n_true_features=5,
+                            interactions=None, nonlinear=None, rho=0.0,
+                            noise='gaussian', custom=None, seed=42):
     """
     Generate synthetic data with various characteristics.
-    
+
     Args:
         n_samples: Number of samples
         n_features: Number of features
         n_true_features: Number of truly important features
         interactions: List of tuples (i,j) or (i,j,k) for interaction terms
-        nonlinear: List of tuples (type, feature_idx) for nonlinear transformations, or 'sawtooth'
+        nonlinear: List of tuples
+                   - (type, feature_idx)
+                   - (type, feature_idx, extra)
+                   or the string 'sawtooth'
         rho: Correlation parameter for feature covariance
         noise: 'gaussian', 'student_t', or 'gaussian_heavy'
         custom: 'rbf' for RBF kernel features
         seed: Random seed for reproducibility
-    
+
     Returns:
         X: Feature matrix
         y: Target vector
         support: True support indices
-        beta_true: True coefficients
+        beta_true: True linear coefficients (only for standard linear part)
     """
     np.random.seed(seed)
-    
-    # Generate features with correlation if rho > 0
+
+    # 1) Merkmalsmatrix X
     if rho > 0:
-        cov_matrix = generate_toeplitz_covariance(n_features, rho)
-        X = multivariate_normal.rvs(mean=np.zeros(n_features), cov=cov_matrix, size=n_samples)
+        cov = generate_toeplitz_covariance(n_features, rho)
+        X = multivariate_normal.rvs(
+            mean=np.zeros(n_features), cov=cov, size=n_samples
+        )
     else:
         X = np.random.randn(n_samples, n_features)
-    
-    # Initialize linear predictor
+
+    # 2) Ground‐truth‐Linear‐Predictor
     linear_predictor = np.zeros(n_samples)
-    
-    # Handle custom RBF kernel scenario
+
+    # 2a) RBF‐Szenario
     if custom == 'rbf':
-        # Choose random centers for RBF kernels
+        # centers und sigma
         mus = np.random.randn(n_true_features, n_features)
         sigma = 1.0
-        
-        # Compute RBF features: exp(-||x - mu||^2 / sigma^2)
-        phi = np.exp(-np.sum((X[:, None, :] - mus[None, :, :])**2, axis=2) / sigma**2)
-        
-        # Generate coefficients for RBF features
-        rbf_coeffs = np.random.uniform(1.0, 3.0, size=n_true_features)
-        linear_predictor = phi.dot(rbf_coeffs)
-        
-        # Use first n_true_features as support for RBF scenario
-        support = np.arange(n_true_features)
-        beta_true = np.zeros(n_features)  # Not directly interpretable for RBF
-        
+        # φ(x)
+        phi = np.exp(
+            -np.sum((X[:, None, :] - mus[None, :, :]) ** 2, axis=2)
+             / sigma ** 2
+        )
+        coeffs       = np.random.uniform(1.0, 3.0, size=n_true_features)
+        linear_predictor = phi.dot(coeffs)
+        support      = np.arange(n_true_features)
+        beta_true    = np.zeros(n_features)
+
     else:
-        # Standard linear model setup
-        # Generate true coefficients with sparse support
+        # 2b) Standard‐linear
         beta_true = np.zeros(n_features)
-        support = np.random.choice(n_features, size=n_true_features, replace=False)
+        support   = np.random.choice(n_features, size=n_true_features, replace=False)
         beta_true[support] = np.random.uniform(1.0, 3.0, size=n_true_features)
-        
-        # Build linear predictor
-        linear_predictor = X.dot(beta_true)
-        
-        # Add interaction terms (2-way or 3-way)
-        if interactions is not None:
-            interaction_coeffs = np.random.uniform(0.5, 1.5, size=len(interactions))
-            for interaction, coeff in zip(interactions, interaction_coeffs):
-                if len(interaction) == 2:
-                    i, j = interaction
+        linear_predictor   = X.dot(beta_true)
+
+        # 3) Interaktionen
+        if interactions:
+            coeffs_int = np.random.uniform(0.5, 1.5, size=len(interactions))
+            for inter, coeff in zip(interactions, coeffs_int):
+                if len(inter) == 2:
+                    i, j = inter
                     linear_predictor += coeff * X[:, i] * X[:, j]
-                elif len(interaction) == 3:
-                    i, j, k = interaction
+                elif len(inter) == 3:
+                    i, j, k = inter
                     linear_predictor += coeff * X[:, i] * X[:, j] * X[:, k]
-        
-        # Add nonlinear terms
+
+        # 4) Nicht‐Linearitäten
         if nonlinear is not None:
-            if nonlinear == 'sawtooth':
-                # Sawtooth function for piecewise linear behavior
+            # a) String‑Spec 'sawtooth'
+            if isinstance(nonlinear, str) and nonlinear.lower() == 'sawtooth':
                 import scipy.signal as sg
+                # wende Sawtooth pro Feature an (Periodenfaktor 5)
                 linear_predictor += np.sum(sg.sawtooth(5 * X, width=0.5), axis=1)
+
+            # b) Liste/Tupel‑Spec
+            elif isinstance(nonlinear, (list, tuple)):
+                coeffs_nonlin = np.random.uniform(0.5, 1.5, size=len(nonlinear))
+                for spec, coeff in zip(nonlinear, coeffs_nonlin):
+                    # je nach Länge 2 oder 3 entpacken
+                    if len(spec) == 2:
+                        transform, idx = spec
+                        extra = None
+                    elif len(spec) == 3:
+                        transform, idx, extra = spec
+                    else:
+                        raise ValueError(f"Ungültiges nonlinear‑Spec: {spec!r}")
+
+                    col = X[:, idx]
+                    if transform == 'sin':
+                        linear_predictor += coeff * np.sin(col)
+                    elif transform == 'square':
+                        linear_predictor += coeff * (col ** 2)
+                    elif transform == 'cube':
+                        linear_predictor += coeff * (col ** 3)
+                    elif transform == 'exp':
+                        linear_predictor += coeff * np.exp(col)
+                    elif transform == 'log':
+                        linear_predictor += coeff * np.log(np.abs(col) + 1e-8)
+                    elif transform == 'sin_highfreq':
+                        # hier extra = Frequenz
+                        linear_predictor += coeff * np.sin(extra * col)
+                    elif transform == 'sawtooth':
+                        import scipy.signal as sg
+                        linear_predictor += coeff * sg.sawtooth(
+                            extra * col, width=0.5
+                        )
+                    else:
+                        raise ValueError(f"Unbekannter Transform‑Typ: {transform!r}")
             else:
-                # Standard nonlinear transformations
-                nonlinear_coeffs = np.random.uniform(0.5, 1.5, size=len(nonlinear))
-                for (transform_type, feature_idx), coeff in zip(nonlinear, nonlinear_coeffs):
-                    if transform_type == 'sin':
-                        linear_predictor += coeff * np.sin(X[:, feature_idx])
-                    elif transform_type == 'square':
-                        linear_predictor += coeff * X[:, feature_idx] ** 2
-                    elif transform_type == 'cube':
-                        linear_predictor += coeff * X[:, feature_idx] ** 3
-                    elif transform_type == 'exp':
-                        linear_predictor += coeff * np.exp(X[:, feature_idx])
-                    elif transform_type == 'log':
-                        # Add small constant to avoid log(0)
-                        linear_predictor += coeff * np.log(np.abs(X[:, feature_idx]) + 1e-8)
-    
-    # Generate targets based on noise type
+                raise ValueError(f"Ungültiges nonlinear‑Spec: {nonlinear!r}")
+
+    # 5) Rauschen & Zielvariable y
     if noise == 'gaussian':
-        # Standard logistic model
         p = expit(linear_predictor)
         y = np.random.binomial(1, p)
+
     elif noise == 'student_t':
-        # Student-t noise (heavier tails)
-        df = 3  # degrees of freedom
-        noise_term = t.rvs(df=df, size=n_samples) * 0.1
+        noise_term = t.rvs(df=3, size=n_samples) * 0.1
         p = expit(linear_predictor + noise_term)
         y = np.random.binomial(1, p)
+
     elif noise == 'gaussian_heavy':
-        # High variance Gaussian noise to make linear signal harder to detect
         p = expit(linear_predictor + np.random.randn(n_samples) * 2.0)
         y = np.random.binomial(1, p)
+
     else:
-        raise ValueError(f"Unknown noise type: {noise}")
-    
+        raise ValueError(f"Unknown noise type: {noise!r}")
+
     return X, y, support, beta_true
+
+
 
 def split_data(X, y, test_size=0.3, seed=42):
     """Split data into train and test sets."""
@@ -411,7 +452,8 @@ methods = [
     run_neural_net,
     run_nimo_baseline,
     run_nimo_variant,
-    run_nimoNew
+    run_nimoNew,
+    run_neural_net2
 ]
 
 print(f"Methods: {[m.__name__ for m in methods]}")
@@ -589,8 +631,8 @@ for scenario_name, params in scenarios.items():
 
 # 5) Write single CSV
 results_df = pd.DataFrame(all_results)
-results_df.to_csv("../results/synthetic/all_model_results_synthetic.csv", index=False)
-print(f"\nAll experiment results saved to ../results/synthetic/all_model_results_synthetic.csv")
+results_df.to_csv("../results/synthetic/all_model_results_synthetic_5Iterations.csv", index=False)
+print(f"\nAll experiment results saved to ../results/synthetic/all_model_results_synthetic_5Iterations.csv")
 
 # Print summary statistics
 print("\n" + "="*60)

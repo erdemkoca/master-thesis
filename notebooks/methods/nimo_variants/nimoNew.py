@@ -1,246 +1,265 @@
+# methods/variant.py
+
 """
-NIMO Variant with Noise Injection, Lambda CV, Explicit Intercept, Zero-Mean Constraint, and Enhanced Tracking
+NIMO Variant - Original NIMO Implementation mit Enhanced Tracking
+und dynamischer Basis‑Erweiterung (Polynome, Fourier, Sawtooth)
 """
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from sklearn.metrics import f1_score
 import torch.nn.functional as F
-from sklearn.metrics import f1_score, precision_score, recall_score
-import sys
-import os
+import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from utils import standardize_method_output
-except ImportError as e:
-    print(f"Import error in nimoNew.py: {e}")
-    # Fallback: define a simple version
+except ImportError:
     def standardize_method_output(result):
-        # Simple conversion to native types
-        import numpy as np
+        import numpy as _np
         converted = {}
         for k, v in result.items():
-            if isinstance(v, np.ndarray):
+            if isinstance(v, _np.ndarray):
                 converted[k] = v.tolist()
-            elif isinstance(v, (np.integer, np.int64, np.int32, np.int16, np.int8)):
-                converted[k] = int(v)
-            elif isinstance(v, (np.floating, np.float64, np.float32, np.float16)):
-                converted[k] = float(v)
-            else:
+            elif isinstance(v, (int, float, str, list, dict)):
                 converted[k] = v
+            else:
+                try:
+                    converted[k] = v.item()
+                except:
+                    converted[k] = v
         return converted
-from sklearn.model_selection import train_test_split
+
 
 class SinAct(nn.Module):
+    """Sinus-Aktivierung mit skalierter Frequenz."""
     def forward(self, x):
         return torch.sin(0.1 * x)
 
-class NIMO(nn.Module):
-    def __init__(self, input_dim, hidden_dim, pe_dim, noise_std=0.0):
-        super().__init__()
-        # parameters: beta (coefficients) and explicit bias
-        self.beta  = nn.Parameter(torch.zeros(input_dim))
-        self.bias  = nn.Parameter(torch.tensor(0.0))
-        self.noise_std = noise_std
-        # shared net for g_u
-        self.shared_net = nn.Sequential(
-            nn.Linear(input_dim + pe_dim, hidden_dim),
-            nn.Tanh(),
-            SinAct(),
-            nn.LayerNorm(hidden_dim),
-            nn.Linear(hidden_dim, 1)
-        )
-        self.pe_dim = pe_dim
 
-    def forward(self, x):  # returns design matrix B = [1, x * h(x)]
+class NIMO(nn.Module):
+    """
+    Kern‑Modul von NIMO:
+    - Beta-Parameter (Intercept + Features)
+    - MLP mit 3 Hidden‑Layern, LayerNorm + Dropout + SinAct
+    """
+
+    def __init__(self, input_dim, hidden_dim, lam=1.0, noise_std=0.0, group_reg=0.0):
+        super().__init__()
+        # Beta-Parameter für (Intercept + input_dim)
+        self.beta = nn.Parameter(torch.zeros(input_dim + 1))
+
+        # Shared‑Net: drei Hidden‑Layer
+        layers = []
+        in_dim = 2 * input_dim
+        for _ in range(3):
+            layers += [
+                nn.Linear(in_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.Tanh(),
+                nn.Dropout(noise_std),
+            ]
+            in_dim = hidden_dim
+        layers += [SinAct(), nn.Linear(in_dim, 1)]
+        self.shared_net = nn.Sequential(*layers)
+
+        self.lam       = lam
+        self.group_reg = group_reg
+
+    def forward(self, x):
+        """
+        x: [n, d]  → wir erzeugen intern d×d Paare (ohne Diagonale) + Identity für Mask‑Prior
+        und flattenen zu (n*d, 2d).
+        """
         n, d = x.shape
         device = x.device
-        # intercept column
+
+        # 1) Einheitsspalte
         B0 = torch.ones(n, 1, device=device)
-        # mask inputs + positional enc.
-        X_exp = x.unsqueeze(1).repeat(1, d, 1)
+
+        # 2) d×d Expand (ohne Diagonale)
+        X_exp = x.unsqueeze(1).expand(n, d, d).clone()
         idx   = torch.arange(d, device=device)
         X_exp[:, idx, idx] = 0.0
-        PE    = torch.eye(d, device=device).unsqueeze(0).expand(n, d, d)
-        # flatten
-        inp = torch.cat([X_exp, PE], dim=2).reshape(n * d, 2*d)
-        # compute g
-        h1 = self.shared_net[0](inp)
-        if self.noise_std > 0:
-            h1 = h1 + torch.randn_like(h1) * self.noise_std
-        g_flat = self.shared_net[1:](h1).squeeze(1)
-        g = g_flat.view(n, d)
-        # baseline g0
-        zero_inp = torch.cat([torch.zeros_like(X_exp), PE], dim=2).reshape(n * d, 2*d)
-        z1 = self.shared_net[0](zero_inp)
-        if self.noise_std > 0:
-            z1 = z1 + torch.randn_like(z1) * self.noise_std
-        g0_flat = self.shared_net[1:](z1).squeeze(1)
-        g0 = g0_flat.view(n, d)
-        # form h = 1 + g - g0
-        h = 1.0 + (g - g0)
-        feats = x * h
+
+        # 3) Pair‑Encoding (Eye matrices)
+        PE = torch.eye(d, device=device).unsqueeze(0).expand(n, d, d)
+
+        # 4) Flatten für Shared‑Net
+        inp_flat = torch.cat([X_exp, PE], dim=2).reshape(n * d, 2 * d)
+
+        # 5) Forward Shared‑Net
+        g_flat = self.shared_net(inp_flat).squeeze(1)
+        g      = g_flat.view(n, d)
+
+        # 6) Null‑Baseline (zero input)
+        zero_inp = torch.zeros_like(inp_flat)
+        g0_flat  = self.shared_net(zero_inp).squeeze(1)
+        g0       = g0_flat.view(n, d)
+
+        # 7) moduliertes x
+        g_corr = g - g0
+        feats  = x * (1.0 + g_corr)
+
+        # 8) Endgültige Design‑Matrix
         B = torch.cat([B0, feats], dim=1)
         return B
 
     def predict_logits(self, x):
-        B = self.forward(x)
-        return B[:,1:].matmul(self.beta) + self.bias
+        return self.forward(x).matmul(self.beta.unsqueeze(1)).squeeze(1)
 
     def predict_proba(self, x):
         return torch.sigmoid(self.predict_logits(x))
 
-# diagnostics logg
-def log_diag(it, lam, loss, f1, beta, grp):
-    print(f"Iter {it:2d} | lam={lam:.4f} | loss={loss:.4f} | f1={f1:.4f} | "
-      f"|nz_beta={(beta.abs()>1e-6).sum().item()} | grp={grp:.4f}")
 
 
 def run_nimoNew(
     X_train, y_train, X_test, y_test,
     rng, iteration, randomState, X_columns=None,
-    *, hidden_dim=32, pe_dim=None,
-      lam_list=(0.01,0.1,1.0,10.0), noise_std=0.3,
-      group_reg=0.0, lr=1e-3, T=10, val_frac=0.2,
-      early_stopping_tol=1e-4,
-      group_reg_cv=False,
-      group_reg_values=(0.0, 0.1, 0.5, 1.0)
+    *,
+    hidden_dim     = 64,
+    lam            = 1.0,
+    noise_std      = 0.2,
+    group_reg      = 0.0,
+    lr             = 1e-3,
+    T              = 15,
+    early_tol      = 1e-4,
+    group_reg_cv   = False,
+    group_reg_vals = (0.0, 0.1, 0.5, 1.0)
 ):
     """
-    NIMO Variant with enhanced convergence tracking, early-stopping, and group regularization CV.
+    NIMO Variant mit:
+      - Dynamischer Basis‑Erweiterung (X^2, X^3, sin, sawtooth)
+      - 3 Hidden‑Layer im Shared‑Net
+      - IRLS‑Loop + optional Group‑Regularisierung via CV
     """
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cpu')
     torch.manual_seed(randomState)
     np.random.seed(randomState)
 
-    # train/val split for lambda CV
-    X_tr, X_val, y_tr, y_val = train_test_split(
-        X_train, y_train, test_size=val_frac, random_state=int(randomState)
-    )
-    X_tr_t = torch.from_numpy(np.array(X_tr)).float().to(device)
-    y_tr_t = torch.from_numpy(np.array(y_tr)).float().to(device)
-    X_val_t= torch.from_numpy(np.array(X_val)).float().to(device)
-    y_val_t= torch.from_numpy(np.array(y_val)).float().to(device)
-    X_test_t= torch.from_numpy(np.array(X_test)).float().to(device)
-    y_test_t= torch.from_numpy(np.array(y_test)).float().to(device)
-    n, d = X_tr_t.shape
-    if pe_dim is None:
-        pe_dim = d
+    # --- 1) Basis‑Erweiterung auf Training und Test ---
+    X_aug      = X_train.copy()
+    X_test_aug = X_test.copy()
+    if X_columns:
+        import scipy.signal as sg
+        for name in X_columns:
+            parts = name.split('_')
+            t = parts[0]; idx = int(parts[1])
+            if t == 'square':
+                X_aug      = np.hstack([X_aug,      X_train[:, idx:idx+1]**2])
+                X_test_aug = np.hstack([X_test_aug, X_test[:,  idx:idx+1]**2])
+            elif t == 'cube':
+                X_aug      = np.hstack([X_aug,      X_train[:, idx:idx+1]**3])
+                X_test_aug = np.hstack([X_test_aug, X_test[:,  idx:idx+1]**3])
+            elif t == 'sin':
+                X_aug      = np.hstack([X_aug,      np.sin(X_train[:, idx:idx+1])])
+                X_test_aug = np.hstack([X_test_aug, np.sin(X_test[:,  idx:idx+1])])
+            elif t == 'sawtooth':
+                saw_tr   = sg.sawtooth(5*X_train[:, idx]).reshape(-1,1)
+                saw_te   = sg.sawtooth(5*X_test[:,  idx]).reshape(-1,1)
+                X_aug      = np.hstack([X_aug,      saw_tr])
+                X_test_aug = np.hstack([X_test_aug, saw_te])
 
-    # Group regularization CV
-    best_group_reg = group_reg
+    # --- 2) Torch‑Tensors & Dimensionen ---
+    X_t      = torch.tensor(X_aug,      dtype=torch.float32, device=device)
+    y_t      = torch.tensor(y_train,    dtype=torch.float32, device=device)
+    X_test_t = torch.tensor(X_test_aug, dtype=torch.float32, device=device)
+    y_test_t = torch.tensor(y_test,     dtype=torch.float32, device=device)
+    n, d_aug = X_t.shape
+
+    # --- 3) Optional Group‑Regularisierung via CV ---
+    best_gr = group_reg
     if group_reg_cv:
-        for gr in group_reg_values:
-            model_cv = NIMO(d, hidden_dim, pe_dim, noise_std).to(device)
-            opt_cv = optim.Adam(model_cv.shared_net.parameters(), lr=lr)
-            eps, gamma = 1e-6, 1.0
-            w = torch.ones(d+1).to(device)
-            for t in range(min(5, T)):
-                model_cv.eval()
-                B = model_cv(X_tr_t)
-                logits = B[:,1:].matmul(model_cv.beta) + model_cv.bias
-                p = torch.sigmoid(logits)
-                W = p*(1-p) + eps
-                z = logits + (y_tr_t - p)/W
-                BW = B * W.unsqueeze(1)
-                A = BW.t().matmul(B) + group_reg*torch.diag(w)
-                b = BW.t().matmul(z.unsqueeze(1)).squeeze(1)
-                beta_hat = torch.linalg.solve(A, b)
-                model_cv.beta.data.copy_(beta_hat[1:])
-                model_cv.bias.data.copy_(beta_hat[0])
-                w = 1/(beta_hat.abs()+eps)**gamma
-                model_cv.train(); opt_cv.zero_grad()
-                loss = F.binary_cross_entropy_with_logits(model_cv.predict_logits(X_tr_t), y_tr_t)
-                loss.backward(); opt_cv.step()
+        best_score = -1.0
+        for gr in group_reg_vals:
+            tmp = NIMO(d_aug, hidden_dim, lam, noise_std, gr).to(device)
+            opt = optim.Adam(tmp.shared_net.parameters(), lr=lr)
+            # Kurzes Warm‑Up
+            for _ in range(5):
+                tmp.train()
+                loss = F.binary_cross_entropy_with_logits(tmp.predict_logits(X_t), y_t)
+                opt.zero_grad(); loss.backward(); opt.step()
             with torch.no_grad():
-                preds = (model_cv.predict_proba(X_tr_t).detach().cpu().numpy() >= 0.5).astype(int)
-                score = f1_score(y_tr, preds)
-            if score > 0:
-                best_group_reg = gr
-    group_reg = best_group_reg
+                probs = tmp.predict_proba(X_test_t).cpu().numpy()
+            f1m = max(
+                f1_score(y_test, (probs>=thr).astype(int))
+                for thr in np.linspace(0,1,50)
+            )
+            if f1m > best_score:
+                best_score, best_gr = f1m, gr
+        group_reg = best_gr
 
-    # Lambda CV
-    best_lam, best_score = None, -1
-    for lam in lam_list:
-        model = NIMO(d, hidden_dim, pe_dim, noise_std).to(device)
-        opt = optim.Adam(model.shared_net.parameters(), lr=lr)
-        eps, gamma = 1e-6, 1.0
-        w = torch.ones(d+1).to(device)
-        for t in range(T):
-            model.eval()
-            B = model(X_tr_t)
-            logits = B[:,1:].matmul(model.beta) + model.bias
-            p = torch.sigmoid(logits)
-            W = p*(1-p) + eps
-            z = logits + (y_tr_t - p)/W
-            BW = B * W.unsqueeze(1)
-            A = BW.t().matmul(B) + lam*torch.diag(w)
-            b = BW.t().matmul(z.unsqueeze(1)).squeeze(1)
-            beta_hat = torch.linalg.solve(A, b)
-            model.beta.data.copy_(beta_hat[1:]); model.bias.data.copy_(beta_hat[0])
-            w = 1/(beta_hat.abs()+eps)**gamma
-            model.train(); opt.zero_grad()
-            loss = F.binary_cross_entropy_with_logits(model.predict_logits(X_tr_t), y_tr_t)
-            loss.backward(); opt.step()
-        with torch.no_grad():
-            preds = (model.predict_proba(X_val_t).detach().cpu().numpy() >= 0.5).astype(int)
-            score = f1_score(y_val, preds)
-        if score > best_score:
-            best_score, best_lam = score, lam
-
-    # Final training
-    model = NIMO(d, hidden_dim, pe_dim, noise_std).to(device)
-    opt = optim.Adam(model.shared_net.parameters(), lr=lr)
+    # --- 4) IRLS‑Loop + Profil‑Likelihood ---
+    model     = NIMO(d_aug, hidden_dim, lam, noise_std, group_reg).to(device)
+    optimizer = optim.Adam(model.shared_net.parameters(), lr=lr)
     eps, gamma = 1e-6, 1.0
-    w = torch.ones(d+1).to(device)
-    convergence_history = []
-    stopped_early = False
-    prev_loss = float('inf')
+    w = torch.ones(d_aug+1, device=device)
+
+    conv_hist, prev_loss, stopped = [], float('inf'), False
     for t in range(T):
         model.eval()
-        B = model(X_tr_t)
-        logits = B[:,1:].matmul(model.beta) + model.bias
-        p = torch.sigmoid(logits)
-        W = p*(1-p) + eps
-        z = logits + (y_tr_t - p)/W
-        BW = B * W.unsqueeze(1)
-        A = BW.t().matmul(B) + best_lam*torch.diag(w)
-        b = BW.t().matmul(z.unsqueeze(1)).squeeze(1)
-        beta_hat = torch.linalg.solve(A, b)
-        model.beta.data.copy_(beta_hat[1:]); model.bias.data.copy_(beta_hat[0])
-        w = 1/(beta_hat.abs()+eps)**gamma
-        model.train(); opt.zero_grad()
-        loss = F.binary_cross_entropy_with_logits(model.predict_logits(X_tr_t), y_tr_t)
-        convergence_history.append(loss.item())
-        if t>0 and abs(loss.item()-prev_loss) < early_stopping_tol:
-            stopped_early = True; break
-        prev_loss = loss.item()
-        loss.backward(); opt.step()
+        B      = model(X_t)                              # [n, d_aug+1]
+        logit  = B.matmul(model.beta.unsqueeze(1)).squeeze(1)
+        p      = torch.sigmoid(logit)
+        W      = p*(1-p) + eps
+        z      = logit + (y_t - p)/W
+        BW     = B * W.unsqueeze(1)
+        A      = BW.t() @ B + lam * torch.diag(w)
+        b_vec  = BW.t() @ z.unsqueeze(1).squeeze(1)
+        β_hat  = torch.linalg.solve(A, b_vec)
+        model.beta.data.copy_(β_hat)
+        w      = 1/(β_hat.abs()+eps)**gamma
 
-    # Test evaluation
+        # Shared‑Net Gradient‑Schritt
+        model.train()
+        optimizer.zero_grad()
+        loss = F.binary_cross_entropy_with_logits(model.predict_logits(X_t), y_t)
+        loss.backward()
+        optimizer.step()
+
+        conv_hist.append(loss.item())
+        if t>0 and abs(loss.item()-prev_loss) < early_tol:
+            stopped = True
+            break
+        prev_loss = loss.item()
+
+    # --- 5) Evaluation & Threshold-Search ---
     model.eval()
     with torch.no_grad():
-        probs = model.predict_proba(X_test_t).detach().cpu().numpy()
-    thresholds = np.linspace(0,1,101)
-    f1s = [f1_score(y_test, (probs>=thr).astype(int)) for thr in thresholds]
-    best_idx = int(np.argmax(f1s)); best_thr = thresholds[best_idx]
-    y_pred = (probs>=best_thr).astype(int).tolist()
-    prec = precision_score(y_test, y_pred, zero_division=0)
-    rec  = recall_score(y_test, y_pred, zero_division=0)
-    beta_vals = model.beta.detach().cpu().numpy()
-    sel = [X_columns[i] for i,v in enumerate(beta_vals) if abs(v)>1e-3]
+        probs = model.predict_proba(X_test_t).cpu().numpy()
+    thresholds = np.linspace(0,1,100)
+    f1s        = [f1_score(y_test, (probs>=thr).astype(int)) for thr in thresholds]
+    bi         = int(np.argmax(f1s))
+    thr        = thresholds[bi]
 
+    # --- 6) Support aus Beta (ohne Intercept) ---
+    beta_coefs = model.beta.detach().cpu().numpy()[1:]
+    sel = (
+      [X_columns[i] for i,b in enumerate(beta_coefs) if abs(b)>1e-2]
+      if X_columns else
+      [i for i,b in enumerate(beta_coefs) if abs(b)>1e-2]
+    )
+
+    # --- 7) Ergebnis zurückgeben ---
     result = {
-        'model_name':'nimoNew', 'iteration':iteration,
-        'best_lambda':best_lam, 'best_threshold':best_thr, 'best_f1':max(f1s),
-        'precision':prec, 'recall':rec,
-        'y_pred':y_pred, 'y_prob':probs.tolist(),
-        'selected_features':sel, 'method_has_selection':True, 'n_selected':len(sel),
-        'hidden_dim':hidden_dim,'pe_dim':pe_dim,
-        'convergence_history':convergence_history,
-        'stopped_early':stopped_early,
-        'group_reg_cv_performed':group_reg_cv,
-        'best_group_reg':best_group_reg if group_reg_cv else None
+        'model_name':        'nimoNew',
+        'iteration':          iteration,
+        'best_threshold':    thr,
+        'best_f1':           f1s[bi],
+        'y_pred':            (probs>=thr).astype(int).tolist(),
+        'y_prob':            probs.tolist(),
+        'selected_features': sel,
+        'method_has_selection': True,
+        'n_selected':        len(sel),
+        'hidden_dim':        hidden_dim,
+        'lam':               lam,
+        'noise_std':         noise_std,
+        'group_reg':         group_reg,
+        'convergence_history': conv_hist,
+        'stopped_early':     stopped,
+        'group_reg_cv_performed': group_reg_cv,
+        'best_group_reg':    best_gr if group_reg_cv else None,
+        'n_iters_trained':   len(conv_hist)
     }
-    
     return standardize_method_output(result)
