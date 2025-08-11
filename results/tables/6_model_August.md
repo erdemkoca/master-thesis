@@ -3,9 +3,14 @@
   - dont use chart lines, more these boxes
   - find out what the problem is with lasso F1
   - dont use F1, use accuracy
-  - understand how synthetic data is generated
+  - understand how synthetic data is generated, understand rho
   - understand every code that he could ask (based on previous and potential questions)
+  - Statistical Pair testing needed?
+  - Random forest volker said something
+  - do the 2-feature illustration (for intuition)
 
+TODO:
+- Write down the formulas for synthetic datasets
 
 
 - Ask what the roadmap could be? when and with wich working on real data?

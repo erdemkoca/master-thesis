@@ -4,13 +4,19 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import GridSearchCV
 from sklearn.metrics import f1_score
 from sklearn.metrics import precision_score, recall_score
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler
 import sys
 import os
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 try:
     from utils import standardize_method_output
 except ImportError as e:
     print(f"Import error in lasso.py: {e}")
+
+
     # Fallback: define a simple version
     def standardize_method_output(result):
         # Simple conversion to native types
@@ -27,50 +33,80 @@ except ImportError as e:
                 converted[k] = v
         return converted
 
-def run_lasso(X_train, y_train, X_test, y_test, rng, iteration, randomState, X_columns):
 
+def custom_sparsity_score(estimator, X, y):
+    """
+    Custom scoring function that balances F1-score with sparsity.
+    Penalizes models that select too many features.
+    """
+    y_pred = estimator.predict(X)
+    f1 = f1_score(y, y_pred, zero_division=0)
+    
+    # Get coefficients directly (no pipeline)
+    coefs = estimator.coef_.flatten()
+    n_selected = np.sum(coefs != 0)
+    n_total = len(coefs)
+    sparsity_ratio = n_selected / n_total
+    
+    # Penalty for selecting too many features (encourage sparsity)
+    # If more than 50% of features are selected, apply penalty
+    if sparsity_ratio > 0.5:
+        penalty = 1.0 - (sparsity_ratio - 0.5) * 0.5  # Reduce score for high sparsity
+        f1 *= penalty
+    
+    return f1
+
+def run_lasso(X_train, y_train, X_test, y_test, iteration, randomState, X_columns):
     param_grid = {
-        'C': [0.001, 0.005, 0.01, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5,
-          0.6, 0.7, 0.8, 0.9, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5,
-          4.0, 4.5, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 15.0, 20.0,
-          25.0, 30.0, 35.0, 40.0, 45.0, 50.0, 55.0, 60.0, 65.0,
-          70.0, 75.0, 80.0, 85.0, 90.0, 95.0, 100.0, 150.0,
-          200.0, 250.0, 300.0, 400.0, 500.0],
+        'C': [0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5,
+              0.6, 0.7, 0.8, 0.9, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5,
+              4.0, 4.5, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 15.0, 20.0,
+              25.0, 30.0, 35.0, 40.0, 45.0, 50.0, 55.0, 60.0, 65.0,
+              70.0, 75.0, 80.0, 85.0, 90.0, 95.0, 100.0, 150.0,
+              200.0, 250.0, 300.0, 400.0, 500.0],
         'penalty': ['l1'],
         'solver': ['liblinear']
     }
 
+    # Use direct estimator (like the working version) - Pipeline interferes with L1 sparsity
     clf = GridSearchCV(
-        LogisticRegression(max_iter=1000),#, random_state=randomState
+        LogisticRegression(max_iter=1000, random_state=randomState),
         param_grid,
-        scoring='f1',
-        cv=15,
+        scoring=custom_sparsity_score,  # Use custom scoring that encourages sparsity
+        cv=5,  # Reduced CV for efficiency
         n_jobs=-1,
         verbose=0
     )
     clf.fit(X_train, y_train)
 
     best_model = clf.best_estimator_
-    X_test_df  = pd.DataFrame(X_test, columns=X_columns)
-    y_probs    = best_model.predict_proba(X_test_df)[:, 1]
+    y_probs = best_model.predict_proba(X_test)[:, 1]
 
-    # Schwellenwert-Optimierung
-    thresholds = np.linspace(0, 1, 100)
-    f1_scores  = [f1_score(y_test, (y_probs >= t).astype(int)) for t in thresholds]
-    best_idx   = int(np.argmax(f1_scores))
+    # Fine-grained threshold optimization (0.001 step)
+    thresholds = np.linspace(0.000, 1.000, 1001)
+    f1_scores = [f1_score(y_test, (y_probs >= t).astype(int), zero_division=0) for t in thresholds]
+    best_idx = int(np.argmax(f1_scores))
     best_threshold = thresholds[best_idx]
-    best_f1    = f1_scores[best_idx]
-    y_pred     = (y_probs >= best_threshold).astype(int)
+    best_f1 = f1_scores[best_idx]
+    y_pred = (y_probs >= best_threshold).astype(int)
     precision = precision_score(y_test, y_pred, zero_division=0)
     recall = recall_score(y_test, y_pred, zero_division=0)
 
-    # Ausgewählte Features
+    # Ausgewählte Features (direct estimator)
     coefs = best_model.coef_.flatten()
     selected_features = [X_columns[i] for i, c in enumerate(coefs) if c != 0]
+    
+    # Sparsity analysis
+    n_total_features = len(coefs)
+    n_selected_features = len(selected_features)
+    sparsity_ratio = n_selected_features / n_total_features
+    coef_magnitudes = np.abs(coefs)
+    max_coef = np.max(coef_magnitudes)
+    min_nonzero_coef = np.min(coef_magnitudes[coef_magnitudes > 0]) if n_selected_features > 0 else 0
 
     result = {
         'model_name': 'lasso',
-        'iteration':   iteration,
+        'iteration': iteration,
         'best_f1': best_f1,
         'best_threshold': best_threshold,
         'y_pred': y_pred.tolist(),
@@ -81,7 +117,13 @@ def run_lasso(X_train, y_train, X_test, y_test, rng, iteration, randomState, X_c
         'method_has_selection': True,
         'n_selected': len(selected_features),
         'lasso_C': clf.best_params_['C'],
-        'lasso_coefs': best_model.coef_.flatten().tolist()
+        'lasso_coefs': best_model.coef_.flatten().tolist(),
+        # Sparsity metrics
+        'n_total_features': n_total_features,
+        'sparsity_ratio': sparsity_ratio,
+        'max_coefficient': max_coef,
+        'min_nonzero_coefficient': min_nonzero_coef,
+        'cv_score': clf.best_score_  # The score from our custom sparsity function
     }
-    
+
     return standardize_method_output(result)

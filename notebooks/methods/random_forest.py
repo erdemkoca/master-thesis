@@ -4,11 +4,14 @@ from sklearn.metrics import f1_score
 from sklearn.model_selection import GridSearchCV
 import sys
 import os
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 try:
     from utils import standardize_method_output
 except ImportError as e:
     print(f"Import error in random_forest.py: {e}")
+
+
     # Fallback: define a simple version
     def standardize_method_output(result):
         # Simple conversion to native types
@@ -25,11 +28,12 @@ except ImportError as e:
                 converted[k] = v
         return converted
 
-def run_random_forest(X_train, y_train, X_test, y_test, rng, iteration, randomState, X_columns=None):
+
+def run_random_forest(X_train, y_train, X_test, y_test, iteration, randomState, X_columns=None):
     # Hyperparameter-Tuning
     param_grid = {'n_estimators': [100, 200, 300]}
     grid = GridSearchCV(
-        RandomForestClassifier(), #random_state=randomState
+        RandomForestClassifier(random_state=randomState),
         param_grid,
         scoring='f1',
         cv=5,
@@ -38,16 +42,16 @@ def run_random_forest(X_train, y_train, X_test, y_test, rng, iteration, randomSt
     grid.fit(X_train, y_train)
 
     best_model = grid.best_estimator_
-    y_probs    = best_model.predict_proba(X_test)[:, 1]
+    y_probs = best_model.predict_proba(X_test)[:, 1]
     importances = best_model.feature_importances_
 
-    # Threshold-Optimierung
-    thresholds = np.linspace(0, 1, 100)
-    f1_scores  = [f1_score(y_test, (y_probs >= t).astype(int)) for t in thresholds]
-    best_idx   = int(np.argmax(f1_scores))
+    # Fine-grained threshold optimization (0.001 step)
+    thresholds = np.linspace(0.000, 1.000, 1001)
+    f1_scores = [f1_score(y_test, (y_probs >= t).astype(int), zero_division=0) for t in thresholds]
+    best_idx = int(np.argmax(f1_scores))
     best_threshold = thresholds[best_idx]
-    best_f1    = f1_scores[best_idx]
-    y_pred     = (y_probs >= best_threshold).astype(int)
+    best_f1 = f1_scores[best_idx]
+    y_pred = (y_probs >= best_threshold).astype(int)
 
     # Feature Importances - use threshold-based selection
     importances = best_model.feature_importances_
@@ -56,17 +60,17 @@ def run_random_forest(X_train, y_train, X_test, y_test, rng, iteration, randomSt
         if X_columns is not None else []
 
     result = {
-        'model_name':         'RandomForest',
-        'iteration':          iteration,
-        'best_params':        grid.best_params_,
-        'best_threshold':     best_threshold,
-        'best_f1':            best_f1,
-        'y_pred':             y_pred.tolist(),
-        'y_prob':             y_probs.tolist(),
+        'model_name': 'RandomForest',
+        'iteration': iteration,
+        'best_params': grid.best_params_,
+        'best_threshold': best_threshold,
+        'best_f1': best_f1,
+        'y_pred': y_pred.tolist(),
+        'y_prob': y_probs.tolist(),
         'feature_importances': importances.tolist(),
-        'selected_features':  selected_features,
+        'selected_features': selected_features,
         'method_has_selection': False,
         'n_selected': len(selected_features)
     }
-    
+
     return standardize_method_output(result)

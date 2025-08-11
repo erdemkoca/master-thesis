@@ -77,7 +77,7 @@ class AdvancedNN(nn.Module):
         x = self.do2(self.bn2(self.max2(x)))
         return self.fc3(x)
 
-def run_neural_net2(X_train, y_train, X_test, y_test, rng, iteration, randomState, X_columns=None):
+def run_neural_net2(X_train, y_train, X_test, y_test, iteration, randomState, X_columns=None):
     torch.manual_seed(randomState)
     np.random.seed(randomState)
 
@@ -150,7 +150,7 @@ def run_neural_net2(X_train, y_train, X_test, y_test, rng, iteration, randomStat
     with torch.no_grad():
         probs = torch.sigmoid(model(X_test_t)).squeeze().cpu().numpy()
 
-    thresholds = np.linspace(0,1,100)
+    thresholds = np.linspace(0.000, 1.000, 1001)
     f1s = [f1_score(y_test, (probs>=t).astype(int)) for t in thresholds]
     best_i = int(np.argmax(f1s))
     best_thresh, best_f1 = thresholds[best_i], f1s[best_i]

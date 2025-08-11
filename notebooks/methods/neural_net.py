@@ -54,7 +54,7 @@ class SimpleNN(nn.Module):
         return self.fc3(x)
 
 
-def run_neural_net(X_train, y_train, X_test, y_test, rng, iteration, randomState, X_columns=None):
+def run_neural_net(X_train, y_train, X_test, y_test, iteration, randomState, X_columns=None):
     """
     Training und Evaluierung eines einfachen Neural Net:
       1. Daten in Torch-Tensoren umwandeln
@@ -131,9 +131,9 @@ def run_neural_net(X_train, y_train, X_test, y_test, rng, iteration, randomState
         logits = model(X_test_t)
         probs  = torch.sigmoid(logits).squeeze().numpy()
 
-    # 7) Threshold-Optimierung für bestmöglichen F1-Score
-    thresholds = np.linspace(0, 1, 100)
-    f1_scores  = [f1_score(y_test, (probs >= t).astype(int)) for t in thresholds]
+    # 7) Fine-grained threshold optimization (0.001 step)
+    thresholds = np.linspace(0.000, 1.000, 1001)
+    f1_scores  = [f1_score(y_test, (probs >= t).astype(int), zero_division=0) for t in thresholds]
     best_idx    = int(np.argmax(f1_scores))
     best_thresh = thresholds[best_idx]
     best_f1     = f1_scores[best_idx]

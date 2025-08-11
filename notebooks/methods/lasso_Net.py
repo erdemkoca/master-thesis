@@ -25,7 +25,7 @@ except ImportError as e:
         return converted
 
 def run_lassonet(X_train, y_train, X_test, y_test,
-                 rng, iteration, randomState, X_columns=None):
+                 iteration, randomState, X_columns=None):
 
     # --- 1) Fit LassoNet with CV ---
     model = LassoNetClassifierCV(cv=5)
@@ -38,7 +38,7 @@ def run_lassonet(X_train, y_train, X_test, y_test,
     else:
         y_probs = np.asarray(y_probs)
 
-    thresholds     = np.linspace(0, 1, 100)
+    thresholds     = np.linspace(0.000, 1.000, 1001)
     f1_scores      = [f1_score(y_test, (y_probs >= t).astype(int)) for t in thresholds]
     best_idx       = int(np.argmax(f1_scores))
     best_threshold = thresholds[best_idx]

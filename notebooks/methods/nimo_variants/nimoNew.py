@@ -116,7 +116,7 @@ class NIMO(nn.Module):
 
 def run_nimoNew(
     X_train, y_train, X_test, y_test,
-    rng, iteration, randomState, X_columns=None,
+    iteration, randomState, X_columns=None,
     *,
     hidden_dim     = 64,
     lam            = 1.0,
@@ -184,7 +184,7 @@ def run_nimoNew(
                 probs = tmp.predict_proba(X_test_t).cpu().numpy()
             f1m = max(
                 f1_score(y_test, (probs>=thr).astype(int))
-                for thr in np.linspace(0,1,50)
+                for thr in np.linspace(0.000, 1.000, 1001)
             )
             if f1m > best_score:
                 best_score, best_gr = f1m, gr

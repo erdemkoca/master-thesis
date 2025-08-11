@@ -248,7 +248,7 @@ class AdaptiveRidgeLogisticRegression(L.LightningModule):
 
 def run_nimo_baseline(
     X_train, y_train, X_test, y_test,
-    rng, iteration, randomState, X_columns=None,
+    iteration, randomState, X_columns=None,
     *,
     max_epochs: int = 50,
     batch_size: int = 64,
@@ -324,7 +324,7 @@ def run_nimo_baseline(
     probs = torch.cat(preds, dim=0).squeeze().cpu().numpy()
 
     # 6) Threshold‑Optimierung
-    thresholds = np.linspace(0,1,100)
+    thresholds = np.linspace(0.000, 1.000, 1001)
     f1s = [f1_score(y_test, (probs>=t).astype(int)) for t in thresholds]
     best_idx = int(np.argmax(f1s))
     best_thr = thresholds[best_idx]

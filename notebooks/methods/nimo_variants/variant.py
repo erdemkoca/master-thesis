@@ -116,7 +116,7 @@ class NIMO(nn.Module):
 
 def run_nimo_variant(
     X_train, y_train, X_test, y_test,
-    rng, iteration, randomState, X_columns=None,
+    iteration, randomState, X_columns=None,
     *, hidden_dim=32, pe_dim=None, lam=1.0, noise_std=0.3,
       group_reg=0.0, lr=1e-3, T=10,
       early_stopping_tol=1e-4,
@@ -188,7 +188,7 @@ def run_nimo_variant(
                 probs_cv = model_cv.predict_proba(X_t).cpu().numpy()
             f1_cv = max(
                 f1_score(y_train, (probs_cv >= thr).astype(int))
-                for thr in np.linspace(0,1,50)
+                for thr in np.linspace(0.000, 1.000, 1001)
             )
             if f1_cv > best_score:
                 best_score, best_group_reg = f1_cv, gr

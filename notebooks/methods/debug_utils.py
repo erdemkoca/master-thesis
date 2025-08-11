@@ -1,4 +1,4 @@
-# methods/debug_utils.py
+x# methods/debug_utils.py
 """
 Utility functions for debugging and validating synthetic experiments
 """
@@ -14,7 +14,7 @@ def md5_array(a: np.ndarray) -> str:
     """
     Calculate MD5 hash of numpy array for debugging purposes
     
-    Args:
+    Args:x
         a: numpy array
     
     Returns:

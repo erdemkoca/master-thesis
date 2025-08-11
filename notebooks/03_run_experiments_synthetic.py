@@ -134,7 +134,7 @@ scenarios = {
         'n_features': 20,
         'n_true_features': 5,
         'interactions': None,
-        'nonlinear': None, 
+        'nonlinear': None,
         'custom': 'rbf',             # RBF kernel features
         'rho': 0.0,
         'noise': 'gaussian',
@@ -472,34 +472,48 @@ for scenario_name, params in scenarios.items():
         for k, v in params.items()
         if not k.startswith('description')
     }
-    X_full, y_full, true_support, beta_true = generate_synthetic_data(**data_params)
-    X_train, y_train, X_test, y_test = split_data(X_full, y_full, test_size=0.3, seed=42)
+    # Generate initial data for scenario description (completely random)
+    X_full_init, y_full_init, true_support, beta_true = generate_synthetic_data(**data_params, seed=np.random.randint(0, 2**31-1))
+    X_train_init, y_train_init, X_test_init, y_test_init = split_data(X_full_init, y_full_init, test_size=0.3, seed=np.random.randint(0, 2**31-1))
     
     print(f"Generated data:")
-    print(f"  Total samples: {len(X_full)}")
-    print(f"  Features: {X_full.shape[1]}")
+    print(f"  Total samples: {len(X_full_init)}")
+    print(f"  Features: {X_full_init.shape[1]}")
     print(f"  True support features: {sorted(true_support)}")
-    print(f"  Train samples: {len(X_train)}")
-    print(f"  Test samples: {len(X_test)}")
-    print(f"  Class distribution (train): {np.bincount(y_train)}")
-    print(f"  Class distribution (test): {np.bincount(y_test)}")
+    print(f"  Train samples: {len(X_train_init)}")
+    print(f"  Test samples: {len(X_test_init)}")
+    print(f"  Class distribution (train): {np.bincount(y_train_init)}")
+    print(f"  Class distribution (test): {np.bincount(y_test_init)}")
     
     # Create feature column names for synthetic data
-    X_columns = [f'feature_{i}' for i in range(X_full.shape[1])]
+    X_columns = [f'feature_{i}' for i in range(X_full_init.shape[1])]
     
     # Inner loop: iterations
     for iteration in range(n_iterations):
         print(f"\n  --- Iteration {iteration} ---")
         
-        # Use iteration as seed for reproducibility
-        rng = np.random.default_rng(iteration)
+        # Generate completely random seed for this iteration (no reproducibility)
+        seed_iter = int(np.random.randint(0, 2**31-1))
         
-        # Use same data for all iterations (deterministic)
-        X_sub = X_train.copy()
-        y_sub = y_train.copy()
+        # Generate FRESH data for each iteration (no reuse!)
+        X_full_iter, y_full_iter, _, _ = generate_synthetic_data(**data_params, seed=seed_iter)
         
-        # Use iteration as random state for reproducibility
-        randomState = iteration
+        # Option: Generate large test set to avoid F1 quantization
+        if hasattr(data_params, 'large_test') and data_params.get('large_test', False):
+            # Generate separate large test set (e.g., 50,000 samples)
+            test_params = data_params.copy()
+            test_params['n_samples'] = 50000
+            _, _, X_test_iter, y_test_iter = generate_synthetic_data(**test_params, seed=seed_iter + 1000)
+        else:
+            # Use standard train/test split
+            X_train_iter, y_train_iter, X_test_iter, y_test_iter = split_data(X_full_iter, y_full_iter, test_size=0.3, seed=seed_iter)
+        
+        # Use fresh data for this iteration
+        X_sub = X_train_iter.copy()
+        y_sub = y_train_iter.copy()
+        
+        # Use iteration-specific seed for reproducibility
+        randomState = seed_iter
         
         # Method loop
         for method_fn in methods:
@@ -508,8 +522,7 @@ for scenario_name, params in scenarios.items():
             try:
                 print(f"      Calling {method_fn.__name__}...")
                 result = method_fn(
-                    X_sub, y_sub, X_test, y_test,
-                    rng,
+                    X_sub, y_sub, X_test_iter, y_test_iter,
                     iteration,
                     randomState,
                     X_columns
@@ -519,12 +532,17 @@ for scenario_name, params in scenarios.items():
                 # Ensure all core fields exist and convert to native types
                 result = ensure_core_fields(result)
                 
+                # Add debug columns for randomness verification
+                result['seed_iter'] = seed_iter
+                result['dataset_hash'] = hash(str(X_sub.tobytes()) + str(y_sub.tobytes()))
+                result['test_hash'] = hash(str(X_test_iter.tobytes()) + str(y_test_iter.tobytes()))
+                
                 # Calculate support recovery metrics
                 if result['selected_features']:
                     recovery_metrics = calculate_support_recovery_metrics(
                         result['selected_features'], 
                         sorted(true_support), 
-                        X_full.shape[1]
+                        X_full_init.shape[1]
                     )
                     result.update(recovery_metrics)
                 
@@ -553,7 +571,7 @@ for scenario_name, params in scenarios.items():
                     'n_true_features': int(len(true_support)),
                     'beta_true': json.dumps(beta_true.tolist()),
                     'data_type': 'synthetic',
-                    'n_features_total': int(X_full.shape[1])
+                    'n_features_total': int(X_full_init.shape[1])
                 }
                 result.update(metadata)
                 
@@ -596,7 +614,15 @@ for scenario_name, params in scenarios.items():
                     fixed_result = {}
                     for k, v in result.items():
                         try:
-                            fixed_result[k] = to_native(v)
+                            # Simple conversion to native types
+                            if isinstance(v, np.ndarray):
+                                fixed_result[k] = v.tolist()
+                            elif isinstance(v, (np.integer, np.int64, np.int32, np.int16, np.int8)):
+                                fixed_result[k] = int(v)
+                            elif isinstance(v, (np.floating, np.float64, np.float32, np.float16)):
+                                fixed_result[k] = float(v)
+                            else:
+                                fixed_result[k] = v
                         except:
                             fixed_result[k] = str(v)  # Convert to string as last resort
                     all_results.append(fixed_result)
@@ -631,8 +657,8 @@ for scenario_name, params in scenarios.items():
 
 # 5) Write single CSV
 results_df = pd.DataFrame(all_results)
-results_df.to_csv("../results/synthetic/all_model_results_synthetic_5Iterations.csv", index=False)
-print(f"\nAll experiment results saved to ../results/synthetic/all_model_results_synthetic_5Iterations.csv")
+results_df.to_csv("../results/synthetic/all_model_results_synthetic_20Iterations_AUGUST.csv", index=False)
+print(f"\nAll experiment results saved to ../results/synthetic/all_model_results_synthetic_20Iterations_AUGUST.csv")
 
 # Print summary statistics
 print("\n" + "="*60)
