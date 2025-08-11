@@ -104,6 +104,12 @@ def run_lasso(X_train, y_train, X_test, y_test, iteration, randomState, X_column
     max_coef = np.max(coef_magnitudes)
     min_nonzero_coef = np.min(coef_magnitudes[coef_magnitudes > 0]) if n_selected_features > 0 else 0
 
+    # Standardisierte Selection-Metadaten für Feature-Selection-Analyse
+    feature_names = list(X_columns)
+    selected_mask = [int(abs(c) > 1e-8) for c in coefs]
+    signs = [0 if abs(c) <= 1e-8 else (1 if c > 0 else -1) for c in coefs]
+    nnz = int(np.sum(np.abs(coefs) > 1e-8))
+
     result = {
         'model_name': 'lasso',
         'iteration': iteration,
@@ -123,7 +129,13 @@ def run_lasso(X_train, y_train, X_test, y_test, iteration, randomState, X_column
         'sparsity_ratio': sparsity_ratio,
         'max_coefficient': max_coef,
         'min_nonzero_coefficient': min_nonzero_coef,
-        'cv_score': clf.best_score_  # The score from our custom sparsity function
+        'cv_score': clf.best_score_,  # The score from our custom sparsity function
+        # Standardisierte Selection-Metadaten
+        'feature_names': feature_names,
+        'coef_all': [float(c) for c in coefs],
+        'selected_mask': selected_mask,
+        'signs': signs,
+        'nnz': nnz
     }
 
     return standardize_method_output(result)

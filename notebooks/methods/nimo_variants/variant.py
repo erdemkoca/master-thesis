@@ -258,6 +258,12 @@ def run_nimo_variant(
     else:
         selected_features = [i for i,b in enumerate(beta_coeffs) if abs(b) > 1e-2]
 
+    # Standardisierte Selection-Metadaten für Feature-Selection-Analyse
+    feature_names = list(X_columns) if X_columns else list(range(len(beta_coeffs)))
+    selected_mask = [int(abs(b) > 1e-8) for b in beta_coeffs]
+    signs = [0 if abs(b) <= 1e-8 else (1 if b > 0 else -1) for b in beta_coeffs]
+    nnz = int(np.sum(np.abs(beta_coeffs) > 1e-8))
+
     # --- Pack result ---
     result = {
         'model_name':'nimo_variant',
@@ -275,6 +281,12 @@ def run_nimo_variant(
         'stopped_early':stopped_early,
         'group_reg_cv_performed':group_reg_cv,
         'best_group_reg':best_group_reg if group_reg_cv else None,
-        'n_iters_trained':len(convergence_history)
+        'n_iters_trained':len(convergence_history),
+        # Standardisierte Selection-Metadaten
+        'feature_names': feature_names,
+        'coef_all': [float(b) for b in beta_coeffs],
+        'selected_mask': selected_mask,
+        'signs': signs,
+        'nnz': nnz
     }
     return standardize_method_output(result)

@@ -241,6 +241,12 @@ def run_nimoNew(
       [i for i,b in enumerate(beta_coefs) if abs(b)>1e-2]
     )
 
+    # Standardisierte Selection-Metadaten für Feature-Selection-Analyse
+    feature_names = list(X_columns) if X_columns else list(range(len(beta_coefs)))
+    selected_mask = [int(abs(b) > 1e-8) for b in beta_coefs]
+    signs = [0 if abs(b) <= 1e-8 else (1 if b > 0 else -1) for b in beta_coefs]
+    nnz = int(np.sum(np.abs(beta_coefs) > 1e-8))
+
     # --- 7) Ergebnis zurückgeben ---
     result = {
         'model_name':        'nimoNew',
@@ -260,6 +266,12 @@ def run_nimoNew(
         'stopped_early':     stopped,
         'group_reg_cv_performed': group_reg_cv,
         'best_group_reg':    best_gr if group_reg_cv else None,
-        'n_iters_trained':   len(conv_hist)
+        'n_iters_trained':   len(conv_hist),
+        # Standardisierte Selection-Metadaten
+        'feature_names': feature_names,
+        'coef_all': [float(b) for b in beta_coefs],
+        'selected_mask': selected_mask,
+        'signs': signs,
+        'nnz': nnz
     }
     return standardize_method_output(result)
