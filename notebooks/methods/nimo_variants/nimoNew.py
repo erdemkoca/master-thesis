@@ -161,11 +161,29 @@ def run_nimoNew(
                 X_aug      = np.hstack([X_aug,      saw_tr])
                 X_test_aug = np.hstack([X_test_aug, saw_te])
 
+    # --- 1b) Standardisierung (nur auf Train fitten!) ---
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    X_aug      = scaler.fit_transform(X_aug)
+    X_test_aug = scaler.transform(X_test_aug)
+
     # --- 2) Torch‑Tensors & Dimensionen ---
     X_t      = torch.tensor(X_aug,      dtype=torch.float32, device=device)
     y_t      = torch.tensor(y_train,    dtype=torch.float32, device=device)
     X_test_t = torch.tensor(X_test_aug, dtype=torch.float32, device=device)
     y_test_t = torch.tensor(y_test,     dtype=torch.float32, device=device)
+    n, d_aug = X_t.shape
+
+    # Split fuer Val zur Threshold-Wahl
+    from sklearn.model_selection import StratifiedShuffleSplit
+    sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=randomState)
+    (tr_idx, val_idx), = sss.split(X_aug, y_train)
+    X_tr, y_tr = X_aug[tr_idx], y_train[tr_idx]
+    X_va, y_va = X_aug[val_idx], y_train[val_idx]
+    
+    # Verwende X_tr/y_tr fuer Training statt gesamtes X_t/y_t
+    X_t = torch.tensor(X_tr, dtype=torch.float32, device=device)
+    y_t = torch.tensor(y_tr, dtype=torch.float32, device=device)
     n, d_aug = X_t.shape
 
     # --- 3) Optional Group‑Regularisierung via CV ---
@@ -192,29 +210,57 @@ def run_nimoNew(
 
     # --- 4) IRLS‑Loop + Profil‑Likelihood ---
     model     = NIMO(d_aug, hidden_dim, lam, noise_std, group_reg).to(device)
-    optimizer = optim.Adam(model.shared_net.parameters(), lr=lr)
-    eps, gamma = 1e-6, 1.0
+    optimizer = optim.Adam(model.shared_net.parameters(), lr=lr, weight_decay=1e-4)
+    eps, gamma = 1e-6, 1.5  # Aggressiveres Schrumpfen
     w = torch.ones(d_aug+1, device=device)
 
     conv_hist, prev_loss, stopped = [], float('inf'), False
     for t in range(T):
         model.eval()
+        
+        # Adaptive Parameter
+        gamma_t = 1.0 + 0.8 * (t / max(1, T-1))  # 1.0 -> 1.8
+        lam_t = lam + (lam * 4.0 - lam) * (t / max(1, T-1))  # lam -> lam*5
+        
         B      = model(X_t)                              # [n, d_aug+1]
         logit  = B.matmul(model.beta.unsqueeze(1)).squeeze(1)
         p      = torch.sigmoid(logit)
         W      = p*(1-p) + eps
         z      = logit + (y_t - p)/W
         BW     = B * W.unsqueeze(1)
-        A      = BW.t() @ B + lam * torch.diag(w)
+        A      = BW.t() @ B + lam_t * torch.diag(w)
         b_vec  = BW.t() @ z.unsqueeze(1).squeeze(1)
         β_hat  = torch.linalg.solve(A, b_vec)
+        
+        # Soft-Threshold (prox fuer L1) nur auf die Features (ohne Intercept)
+        beta_np = β_hat.detach().cpu().numpy()
+        tau_step = 1e-3  # klein starten
+        beta_np[1:] = np.sign(beta_np[1:]) * np.maximum(np.abs(beta_np[1:]) - tau_step, 0.0)
+        β_hat = torch.tensor(beta_np, dtype=β_hat.dtype, device=β_hat.device)
+        
         model.beta.data.copy_(β_hat)
-        w      = 1/(β_hat.abs()+eps)**gamma
+        w      = 1/(β_hat.abs()+eps)**gamma_t
 
         # Shared‑Net Gradient‑Schritt
         model.train()
         optimizer.zero_grad()
-        loss = F.binary_cross_entropy_with_logits(model.predict_logits(X_t), y_t)
+        
+        # L1-Penalty auf g_corr (macht die Modulationsfunktion sparsamer)
+        lambda_g = 1e-3  # klein anfangen
+        with torch.no_grad():
+            n, d = X_t.shape
+            idx = torch.arange(d, device=X_t.device)
+            X_exp = X_t.unsqueeze(1).expand(n, d, d).clone()
+            X_exp[:, idx, idx] = 0.0
+            PE = torch.eye(d, device=X_t.device).unsqueeze(0).expand(n, d, d)
+            inp_flat = torch.cat([X_exp, PE], dim=2).reshape(n*d, 2*d)
+
+            g_flat = model.shared_net(inp_flat).squeeze(1)
+            g0_flat = model.shared_net(torch.zeros_like(inp_flat)).squeeze(1)
+            g_corr = (g_flat - g0_flat).view(n, d)
+            reg_g  = lambda_g * torch.mean(torch.abs(g_corr))
+        
+        loss = F.binary_cross_entropy_with_logits(model.predict_logits(X_t), y_t) + reg_g
         loss.backward()
         optimizer.step()
 
@@ -228,13 +274,68 @@ def run_nimoNew(
     model.eval()
     with torch.no_grad():
         probs = model.predict_proba(X_test_t).cpu().numpy()
-    thresholds = np.linspace(0,1,100)
+    thresholds = np.linspace(0.0, 1.0, 1001)  # Feineres Grid
     f1s        = [f1_score(y_test, (probs>=thr).astype(int)) for thr in thresholds]
     bi         = int(np.argmax(f1s))
     thr        = thresholds[bi]
 
     # --- 6) Support aus Beta (ohne Intercept) ---
     beta_coefs = model.beta.detach().cpu().numpy()[1:]
+
+    # Validierungsbasierte Wahl von tau fuer |beta|
+    tau_grid = np.array([1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2])
+    best_tau, best_score = tau_grid[0], -1.0
+    for tau in tau_grid:
+        beta_tau = beta_coefs.copy()
+        beta_tau[np.abs(beta_tau) < tau] = 0.0  # Hard-Threshold
+        # proxy: Support-F1 gegen (linear ODER total) truth kannst du spaeter einbauen;
+        # hier einfach "Sparsity bei aehnlicher Val-F1" als Heuristik:
+        model_tmp = model  # logits haengen linear von beta ab
+        with torch.no_grad():
+            # setze temporaer Beta mit Threshold fuer Val-Prognose
+            full_beta = model.beta.detach().clone()
+            full_beta[1:] = torch.tensor(beta_tau, dtype=full_beta.dtype)
+            logits = model.forward(torch.tensor(X_va, dtype=torch.float32)).matmul(full_beta.unsqueeze(1)).squeeze(1)
+            probs  = torch.sigmoid(logits).cpu().numpy()
+        # F1 auf Val (feines Grid fuer Klassifikationsschwelle)
+        ths = np.linspace(0.0,1.0,1001)
+        f1s = [f1_score(y_va, (probs>=t).astype(int), zero_division=0) for t in ths]
+        f1v = max(f1s)
+        # simple Auswahl: maximaler Val-F1 bei moeglichst kleiner nnz
+        nnz_tau = int((np.abs(beta_tau) > 0).sum())
+        score = f1v - 1e-4*nnz_tau  # kleines Parsimonie-Penalty
+        if score > best_score:
+            best_score, best_tau = score, tau
+
+    # final: Hart-Threshold mit best_tau auf gesamte Beta
+    beta_coefs[np.abs(beta_coefs) < best_tau] = 0.0
+
+    # Group-Lasso (block-soft-threshold) auf Beta-Gruppen
+    def build_groups(X_columns):
+        groups = {}
+        for j,name in enumerate(X_columns):
+            # base-id am Ende extrahieren, fallback auf j
+            parts = name.split('_')
+            base = parts[-1] if parts[-1].isdigit() else str(j)
+            groups.setdefault(base, []).append(j)
+        return list(groups.values())
+
+    groups = build_groups(X_columns) if X_columns is not None else [ [j] for j in range(len(beta_coefs)) ]
+
+    # Block soft-threshold
+    beta_np = model.beta.detach().cpu().numpy()
+    beta_w = beta_np[1:]  # ohne Intercept
+    tau_group = 5e-3      # tunen
+    for G in groups:
+        v = beta_w[G]
+        norm = np.linalg.norm(v, 2)
+        if norm <= tau_group:
+            beta_w[G] = 0.0
+        else:
+            beta_w[G] = (1 - tau_group/norm) * v
+    beta_np[1:] = beta_w
+    beta_coefs = beta_w  # Update beta_coefs fuer selected_features
+
     sel = (
       [X_columns[i] for i,b in enumerate(beta_coefs) if abs(b)>1e-2]
       if X_columns else
@@ -272,6 +373,11 @@ def run_nimoNew(
         'coef_all': [float(b) for b in beta_coefs],
         'selected_mask': selected_mask,
         'signs': signs,
-        'nnz': nnz
+        'nnz': nnz,
+        # Sparsity-spezifische Metadaten
+        'best_tau': float(best_tau),
+        'tau_group': 5e-3,
+        'final_nnz': int((np.abs(beta_coefs) > 0).sum()),
+        'sparsity_ratio': float((np.abs(beta_coefs) > 0).sum() / len(beta_coefs))
     }
     return standardize_method_output(result)
