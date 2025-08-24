@@ -29,7 +29,7 @@ except ImportError as e:
         return converted
 
 
-def run_random_forest(X_train, y_train, X_test, y_test, iteration, randomState, X_columns=None):
+def run_random_forest(X_train, y_train, X_test, y_test, iteration, randomState, X_columns=None, X_val=None, y_val=None):
     # Hyperparameter-Tuning
     param_grid = {'n_estimators': [100, 200, 300]}
     grid = GridSearchCV(

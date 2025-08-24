@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import os
 import json
+import hashlib
 from scipy.special import expit
 from scipy.stats import multivariate_normal, t
 
@@ -21,6 +22,14 @@ from methods.nimo_variants.variant import run_nimo_variant
 from methods.nimo_variants.nimoNew import run_nimoNew
 from methods.utils import to_native, standardize_method_output
 from methods.neural_net2 import run_neural_net2
+
+def _md5_bytes(*arrays):
+    """Generate stable MD5 hash from numpy arrays"""
+    m = hashlib.md5()
+    for a in arrays:
+        a_c = np.ascontiguousarray(a)
+        m.update(a_c.view(np.uint8))
+    return m.hexdigest()
 
 
 # Create results directories
@@ -42,149 +51,149 @@ scenarios = {
         'description':       'Independent linear',
         'description_long':  'Basic linear model with independent features'
     },
-    'B': {
-        'n_samples': 200,
-        'n_features': 20,
-        'n_true_features': 5,
-        'interactions': [(0,1), (2,3)],
-        'nonlinear': None,
-        'rho': 0.0,
-        'noise': 'gaussian',
-        'description':       'Feature interactions',
-        'description_long':  'Linear model with feature interactions'
-    },
-    'C': {
-        'n_samples': 200,
-        'n_features': 25,
-        'n_true_features': 0,
-        'interactions': None,
-        'nonlinear': (
-            [('sin', i) for i in range(5)]
-          + [('square', i) for i in range(5,10)]
-          + [('cube', i) for i in range(10,15)]
-        ),
-        'rho': 0.0,
-        'noise': 'gaussian',
-        'description':      'Pure nonlinear',
-        'description_long': 'No linear β·X. 5×sin(X), 5×X², 5×X³ + Gaussian noise'
-    },
-    'D': {
-        'n_samples': 100,
-        'n_features': 20,
-        'n_true_features': 5,
-        'interactions': [(0,1), (2,3), (4,5,6)],
-        'nonlinear': [('sin', 2)],
-        'rho': 0.95,
-        'noise': 'gaussian_heavy',
-        'description':       'Hard Interactions + corr.',
-        'description_long':  'Complex model w/ interactions, ρ=0.95, two interactions + 3‑way, heavy noise '
-    },
-    'E': {
-        'n_samples': 200,
-        'n_features': 20,
-        'n_true_features': 5,
-        'interactions': [(0,1)],
-        'nonlinear': None,
-        'rho': 0.0,
-        'noise': 'student_t',
-        'description':       'Heavy‑tailed noise',
-        'description_long':  'Linear model with heavy‑tailed (Student‑t) noise'
-    },
-    'F': {
-        'n_samples': 300,
-        'n_features': 20,           # hier ziehen wir 20 rohe X
-        'n_true_features': 5,
-        'interactions': None,
-        'nonlinear': [ # Wir hängen 5 sehr hochfrequente Sinus‑Basisfunktionen an
-            ('sin_highfreq', k, freq)
-            for k, freq in zip(range(5), [5, 7, 9, 11, 13])
-        ],
-        'rho': 0.0,
-        'noise': 'gaussian_heavy',
-        'description':       'High‑freq sin (hidden)',
-        'description_long':  (
-            'Draw X ~ N(0,I), then add 5 columns sin(freq·X_k) '
-            'with frequencies [5,7,9,11,13] + heavy Gaussian noise'
-        )
-    },
-    'G': {
-        'n_samples': 500,
-        'n_features': 10,
-        'n_true_features': 2,
-        'interactions': [(0,1), (2,3)],
-        'nonlinear': None,
-        'rho': 0.0,
-        'noise': 'gaussian',
-        'description':       'XOR interactions',
-        'description_long':  'Signal = x₀⊕x₁ + x₂⊕x₃ + Gaussian noise'
-    },
-    'H': {
-        'n_samples': 300,
-        'n_features': 15,
-        'n_true_features': 3,
-        'interactions': None,
-        'nonlinear': [('square', 0), ('cube', 1)],
-        'rho': 0.9,
-        'noise': 'gaussian',
-        'description':       'Polynom + corr.',
-        'description_long':  'ρ=0.9, Signal = β₀ x₀² + β₁ x₁³ + Gaussian noise'
-    },
-    'I': {
-        'n_samples': 300,
-        'n_features': 20,
-        'n_true_features': 5,
-        'interactions': None,
-        'nonlinear': None,
-        'custom': 'rbf',             # RBF kernel features
-        'rho': 0.0,
-        'noise': 'gaussian',
-        'description':      'RBF-Kernel',
-        'description_long': 'y = sigmoid( exp(-||x - mu||^2 / sigma^2) ) + noise'
-    },
-    'J': {
-        'n_samples': 800,
-        'n_features': 15,
-        'n_true_features': 5,
-        'interactions': None,
-        'nonlinear': 'sawtooth',
-        'rho': 0.0,
-        'noise': 'gaussian',
-        'description':      'Piecewise Sägezahn',
-        'description_long': 'y = sawtooth(x_k) + sum_sin(...) + noise'
-    },
-    'K': {
-        'n_samples': 2000,
-        'n_features': 12,
-        'n_true_features': 4,
-        'interactions': [(0,1,2), (3,4,5)],  # 3-way interactions
-        'nonlinear': None,
-        'rho': 0.5,
-        'noise': 'gaussian',
-        'description':      '3‑Wege Interaktionen',
-        'description_long': 'y = x0*x1*x2 + x3*x4*x5 + corr + noise'
-    },
-    'L': {
-        'n_samples': 50,
-        'n_features': 500,
-        'n_true_features': 10,
-        'interactions': None,
-        'nonlinear': [('sin', i) for i in range(10)],
-        'rho': 0.0,
-        'noise': 'gaussian_heavy',
-        'description':      'High-dim + noise',
-        'description_long': 'n < p, high noise, nonlinear signal'
-    },
-    'M': {
-        'n_samples': 300,
-        'n_features': 20,
-        'n_true_features': 5,
-        'interactions': [(0,1), (2,3)],
-        'nonlinear': [('square', 0), ('cube', 1), ('sin', 2)],
-        'rho': 0.8,
-        'noise': 'student_t',
-        'description':      'Complex + heavy noise',
-        'description_long': 'Interactions + polynomials + correlations + heavy-tailed noise'
-    },
+    # 'B': {
+    #     'n_samples': 200,
+    #     'n_features': 20,
+    #     'n_true_features': 5,
+    #     'interactions': [(0,1), (2,3)],
+    #     'nonlinear': None,
+    #     'rho': 0.0,
+    #     'noise': 'gaussian',
+    #     'description':       'Feature interactions',
+    #     'description_long':  'Linear model with feature interactions'
+    # },
+    # 'C': {
+    #     'n_samples': 200,
+    #     'n_features': 25,
+    #     'n_true_features': 0,
+    #     'interactions': None,
+    #     'nonlinear': (
+    #         [('sin', i) for i in range(5)]
+    #       + [('square', i) for i in range(5,10)]
+    #       + [('cube', i) for i in range(10,15)]
+    #     ),
+    #     'rho': 0.0,
+    #     'noise': 'gaussian',
+    #     'description':      'Pure nonlinear',
+    #     'description_long': 'No linear β·X. 5×sin(X), 5×X², 5×X³ + Gaussian noise'
+    # },
+    # 'D': {
+    #     'n_samples': 100,
+    #     'n_features': 20,
+    #     'n_true_features': 5,
+    #     'interactions': [(0,1), (2,3), (4,5,6)],
+    #     'nonlinear': [('sin', 2)],
+    #     'rho': 0.95,
+    #     'noise': 'gaussian_heavy',
+    #     'description':       'Hard Interactions + corr.',
+    #     'description_long':  'Complex model w/ interactions, ρ=0.95, two interactions + 3‑way, heavy noise '
+    # },
+    # 'E': {
+    #     'n_samples': 200,
+    #     'n_features': 20,
+    #     'n_true_features': 5,
+    #     'interactions': [(0,1)],
+    #     'nonlinear': None,
+    #     'rho': 0.0,
+    #     'noise': 'student_t',
+    #     'description':       'Heavy‑tailed noise',
+    #     'description_long':  'Linear model with heavy‑tailed (Student‑t) noise'
+    # },
+    # 'F': {
+    #     'n_samples': 300,
+    #     'n_features': 20,           # hier ziehen wir 20 rohe X
+    #     'n_true_features': 5,
+    #     'interactions': None,
+    #     'nonlinear': [ # Wir hängen 5 sehr hochfrequente Sinus‑Basisfunktionen an
+    #         ('sin_highfreq', k, freq)
+    #         for k, freq in zip(range(5), [5, 7, 9, 11, 13])
+    #     ],
+    #     'rho': 0.0,
+    #     'noise': 'gaussian_heavy',
+    #     'description':       'High‑freq sin (hidden)',
+    #     'description_long':  (
+    #         'Draw X ~ N(0,I), then add 5 columns sin(freq·X_k) '
+    #         'with frequencies [5,7,9,11,13] + heavy Gaussian noise'
+    #     )
+    # },
+    # 'G': {
+    #     'n_samples': 500,
+    #     'n_features': 10,
+    #     'n_true_features': 2,
+    #     'interactions': [(0,1), (2,3)],
+    #     'nonlinear': None,
+    #     'rho': 0.0,
+    #     'noise': 'gaussian',
+    #     'description':       'XOR interactions',
+    #     'description_long':  'Signal = x₀⊕x₁ + x₂⊕x₃ + Gaussian noise'
+    # },
+    # 'H': {
+    #     'n_samples': 300,
+    #     'n_features': 15,
+    #     'n_true_features': 3,
+    #     'interactions': None,
+    #     'nonlinear': [('square', 0), ('cube', 1)],
+    #     'rho': 0.9,
+    #     'noise': 'gaussian',
+    #     'description':       'Polynom + corr.',
+    #     'description_long':  'ρ=0.9, Signal = β₀ x₀² + β₁ x₁³ + Gaussian noise'
+    # },
+    # 'I': {
+    #     'n_samples': 300,
+    #     'n_features': 20,
+    #     'n_true_features': 5,
+    #     'interactions': None,
+    #     'nonlinear': None,
+    #     'custom': 'rbf',             # RBF kernel features
+    #     'rho': 0.0,
+    #     'noise': 'gaussian',
+    #     'description':      'RBF-Kernel',
+    #     'description_long': 'y = sigmoid( exp(-||x - mu||^2 / sigma^2) ) + noise'
+    # },
+    # 'J': {
+    #     'n_samples': 800,
+    #     'n_features': 15,
+    #     'n_true_features': 5,
+    #     'interactions': None,
+    #     'nonlinear': 'sawtooth',
+    #     'rho': 0.0,
+    #     'noise': 'gaussian',
+    #     'description':      'Piecewise Sägezahn',
+    #     'description_long': 'y = sawtooth(x_k) + sum_sin(...) + noise'
+    # },
+    # 'K': {
+    #     'n_samples': 2000,
+    #     'n_features': 12,
+    #     'n_true_features': 4,
+    #     'interactions': [(0,1,2), (3,4,5)],  # 3-way interactions
+    #     'nonlinear': None,
+    #     'rho': 0.5,
+    #     'noise': 'gaussian',
+    #     'description':      '3‑Wege Interaktionen',
+    #     'description_long': 'y = x0*x1*x2 + x3*x4*x5 + corr + noise'
+    # },
+    # 'L': {
+    #     'n_samples': 50,
+    #     'n_features': 500,
+    #     'n_true_features': 10,
+    #     'interactions': None,
+    #     'nonlinear': [('sin', i) for i in range(10)],
+    #     'rho': 0.0,
+    #     'noise': 'gaussian_heavy',
+    #     'description':      'High-dim + noise',
+    #     'description_long': 'n < p, high noise, nonlinear signal'
+    # },
+    # 'M': {
+    #     'n_samples': 300,
+    #     'n_features': 20,
+    #     'n_true_features': 5,
+    #     'interactions': [(0,1), (2,3)],
+    #     'nonlinear': [('square', 0), ('cube', 1), ('sin', 2)],
+    #     'rho': 0.8,
+    #     'noise': 'student_t',
+    #     'description':      'Complex + heavy noise',
+    #     'description_long': 'Interactions + polynomials + correlations + heavy-tailed noise'
+    # },
 }
 
 
@@ -315,7 +324,7 @@ def generate_synthetic_data(n_samples=200, n_features=20, n_true_features=5,
             mean=np.zeros(n_features), cov=cov, size=n_samples
         )
     else:
-        X = np.random.randn(n_samples, n_features)
+        X = np.random.randn(n_samples, n_features) * 10.0
 
     # 2) Ground‐truth‐Linear‐Predictor
     linear_predictor = np.zeros(n_samples)
@@ -435,7 +444,7 @@ def split_data(X, y, test_size=0.3, seed=42):
 
 # Main experiment loop
 all_results = []
-n_iterations = 20
+n_iterations = 2
 
 print("="*60)
 print("SYNTHETIC DATA EXPERIMENT RUNNER")
@@ -447,13 +456,13 @@ print()
 # Define methods to run
 methods = [
     run_lasso,
-    run_lassonet,
-    run_random_forest,
-    run_neural_net,
-    run_nimo_baseline,
-    run_nimo_variant,
-    run_nimoNew,
-    run_neural_net2
+    #run_lassonet,
+    #run_random_forest,
+    #run_neural_net,
+    #run_nimo_baseline,
+    #run_nimo_variant,
+    #run_nimoNew,
+    #run_neural_net2
 ]
 
 print(f"Methods: {[m.__name__ for m in methods]}")
@@ -488,6 +497,17 @@ for scenario_name, params in scenarios.items():
     # Create feature column names for synthetic data
     X_columns = [f'feature_{i}' for i in range(X_full_init.shape[1])]
     
+    # Datenparameter fuer das Szenario (ohne description)
+    data_params = {k:v for k,v in params.items() if not k.startswith('description')}
+
+    # Fixes Testset erzeugen und cachen
+    seed_test = int(np.random.randint(0, 2**31-1))
+    test_params = dict(data_params)
+    test_params['n_samples'] = 50_000  # grosses Testset
+    X_test_fixed, y_test_fixed, true_support_test, beta_true_test = generate_synthetic_data(**test_params, seed=seed_test)
+
+    test_hash = hash(X_test_fixed.tobytes()) ^ hash(y_test_fixed.tobytes())
+
     # Inner loop: iterations
     for iteration in range(n_iterations):
         print(f"\n  --- Iteration {iteration} ---")
@@ -495,18 +515,36 @@ for scenario_name, params in scenarios.items():
         # Generate completely random seed for this iteration (no reproducibility)
         seed_iter = int(np.random.randint(0, 2**31-1))
         
-        # Generate FRESH data for each iteration (no reuse!)
-        X_full_iter, y_full_iter, _, _ = generate_synthetic_data(**data_params, seed=seed_iter)
+        # Frische gesamte Trainingsdaten fuer diese Iteration
+        X_full_iter, y_full_iter, true_support_iter, beta_true_iter = generate_synthetic_data(**data_params, seed=seed_iter)
+
+        # Stratifizierter Train/Val-Split (z.B. 70/30)
+        from sklearn.model_selection import StratifiedShuffleSplit
+        sss = StratifiedShuffleSplit(n_splits=1, test_size=0.3, random_state=seed_iter)
+        (train_idx, val_idx), = sss.split(X_full_iter, y_full_iter)
+
+        X_train_iter, y_train_iter = X_full_iter[train_idx], y_full_iter[train_idx]
+        X_val_iter,   y_val_iter   = X_full_iter[val_idx],   y_full_iter[val_idx]
+
+        # Hashes fuer Debug/Variation
+        train_idx_hash = hash(train_idx.tobytes())
+        val_idx_hash   = hash(val_idx.tobytes())
         
-        # Option: Generate large test set to avoid F1 quantization
-        if hasattr(data_params, 'large_test') and data_params.get('large_test', False):
-            # Generate separate large test set (e.g., 50,000 samples)
-            test_params = data_params.copy()
-            test_params['n_samples'] = 50000
-            _, _, X_test_iter, y_test_iter = generate_synthetic_data(**test_params, seed=seed_iter + 1000)
-        else:
-            # Use standard train/test split
-            X_train_iter, y_train_iter, X_test_iter, y_test_iter = split_data(X_full_iter, y_full_iter, test_size=0.3, seed=seed_iter)
+        # True-Support pro Iteration aufbauen (linear & total)
+        # Linearer Support ist true_support_iter (kommt vom Generator)
+        true_linear_iter = sorted(map(int, true_support_iter))
+
+        # Totaler Support = linear ∪ alle Indizes aus interactions ∪ alle Indizes aus nonlinear
+        true_total_iter = set(true_linear_iter)
+        if params.get('interactions'):
+            for inter in params['interactions']:
+                for idx in inter: true_total_iter.add(int(idx))
+        if params.get('nonlinear'):
+            for spec in params['nonlinear']:
+                # spec: (typ, feature_idx[, extra])
+                idx = int(spec[1])
+                true_total_iter.add(idx)
+        true_total_iter = sorted(true_total_iter)
         
         # Use fresh data for this iteration
         X_sub = X_train_iter.copy()
@@ -522,27 +560,36 @@ for scenario_name, params in scenarios.items():
             try:
                 print(f"      Calling {method_fn.__name__}...")
                 result = method_fn(
-                    X_sub, y_sub, X_test_iter, y_test_iter,
+                    X_train_iter, y_train_iter,
+                    X_test_fixed, y_test_fixed,                 # fixes Testset fuer alle
                     iteration,
-                    randomState,
-                    X_columns
+                    seed_iter,
+                    X_columns,
+                    X_val=X_val_iter, y_val=y_val_iter          # NEU: Validation fuer Threshold
                 )
                 print(f"      {method_fn.__name__} returned successfully")
                 
                 # Ensure all core fields exist and convert to native types
                 result = ensure_core_fields(result)
                 
+                # Add feature names for this iteration
+                result['feature_names'] = json.dumps([f'feature_{i}' for i in range(X_full_iter.shape[1])])
+                
+                # Seeds & Hashes
+                result['seed_iter'] = int(seed_iter)
+                result['train_idx_hash'] = int(train_idx_hash)
+                result['val_idx_hash'] = int(val_idx_hash)
+                result['test_hash'] = int(test_hash)
+                
                 # Add debug columns for randomness verification
-                result['seed_iter'] = seed_iter
-                result['dataset_hash'] = hash(str(X_sub.tobytes()) + str(y_sub.tobytes()))
-                result['test_hash'] = hash(str(X_test_iter.tobytes()) + str(y_test_iter.tobytes()))
+                result['dataset_hash'] = _md5_bytes(X_sub, y_sub)
                 
                 # Calculate support recovery metrics
                 if result['selected_features']:
                     recovery_metrics = calculate_support_recovery_metrics(
                         result['selected_features'], 
-                        sorted(true_support), 
-                        X_full_init.shape[1]
+                        true_linear_iter, 
+                        X_full_iter.shape[1]
                     )
                     result.update(recovery_metrics)
                 
@@ -567,12 +614,39 @@ for scenario_name, params in scenarios.items():
                     'interactions': json.dumps(params['interactions']) if params['interactions'] else None,
                     'nonlinear_terms': json.dumps(params['nonlinear']) if params['nonlinear'] else None,
                     'custom_function': params.get('custom', None),
-                    'true_support': json.dumps([int(x) for x in sorted(true_support)]),
-                    'n_true_features': int(len(true_support)),
-                    'beta_true': json.dumps(beta_true.tolist()),
+                    'true_support': json.dumps(true_linear_iter),          # linear
+                    'true_support_total': json.dumps(true_total_iter),     # linear ∪ inter ∪ nonlin
+                    'n_true_features': int(len(true_linear_iter)),
+                    'n_true_features_total': int(len(true_total_iter)),
+                    'beta_true': json.dumps([float(b) for b in beta_true_iter.tolist()]),
                     'data_type': 'synthetic',
-                    'n_features_total': int(X_full_init.shape[1])
+                    'n_features_total': int(X_full_iter.shape[1])
                 }
+                
+                # Add detailed truth metadata: linear, interaction, nonlinear and union
+                true_interaction_idx = set()
+                if params.get('interactions'):
+                    for tpl in params['interactions']:
+                        if isinstance(tpl, (list, tuple)):
+                            for i in tpl:
+                                true_interaction_idx.add(int(i))
+
+                true_nonlinear_idx = set()
+                if params.get('nonlinear') and isinstance(params['nonlinear'], (list, tuple)):
+                    for spec in params['nonlinear']:
+                        # ('sin', i) bzw. ('sin_highfreq', i, freq) etc.
+                        if isinstance(spec, (list, tuple)) and len(spec) >= 2:
+                            true_nonlinear_idx.add(int(spec[1]))
+
+                true_union_idx = sorted(set(true_support_iter) | true_interaction_idx | true_nonlinear_idx)
+
+                metadata.update({
+                    'true_support_linear': json.dumps(sorted(int(i) for i in true_support_iter)),
+                    'true_support_interaction': json.dumps(sorted(int(i) for i in true_interaction_idx)) if true_interaction_idx else None,
+                    'true_support_nonlinear': json.dumps(sorted(int(i) for i in true_nonlinear_idx)) if true_nonlinear_idx else None,
+                    'true_support_total': json.dumps([int(i) for i in true_union_idx]),
+                })
+                
                 result.update(metadata)
                 
                 # Add early-stopping and convergence information if available
@@ -602,6 +676,11 @@ for scenario_name, params in scenarios.items():
                 else:
                     result['group_reg_cv_performed'] = False
                     result['best_group_reg'] = None
+                
+                # Mini-Guards
+                assert 'best_f1' in result
+                assert 'selected_features' in result or 'coef_all' in result
+                assert 'true_support' in result and 'true_support_total' in result
                 
                 # Final check: ensure all values are native types
                 try:
@@ -657,8 +736,8 @@ for scenario_name, params in scenarios.items():
 
 # 5) Write single CSV
 results_df = pd.DataFrame(all_results)
-results_df.to_csv("../results/synthetic/all_model_results_synthetic_20Iterations_AUGUST.csv", index=False)
-print(f"\nAll experiment results saved to ../results/synthetic/all_model_results_synthetic_20Iterations_AUGUST.csv")
+results_df.to_csv("../results/synthetic/lasso_nimo_coefficients.csv", index=False)
+print(f"\nAll experiment results saved to ../results/synthetic/lasso_nimo_coefficients.csv")
 
 # Print summary statistics
 print("\n" + "="*60)

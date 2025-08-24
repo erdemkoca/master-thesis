@@ -1,3 +1,10 @@
+Volker 11.Aug:
+- Laaso not working good.
+- Testing and Training should have same alpphas/betas
+- udnerstand the points of code
+
+
+ 
 - Write Introduction and methodology of master thesis
 - Make the code much better. 
   - dont use chart lines, more these boxes
@@ -8,6 +15,22 @@
   - Statistical Pair testing needed?
   - Random forest volker said something
   - do the 2-feature illustration (for intuition)
+  - more grouplasso sparsity how?
+
+TODO:
+1. plots verstehen
+2. nimo verbessern 
+3. 2-feature illustration
+4. make hiher test set
+
+Nimo verbessern:
+NIMO sparsity verbessern (wenn Interpretierbarkeit Ziel ist):
+
+staerker regularisieren: lam erhoehen; explizites L1/L0-Aequivalent auf beta pruefen (oder magnitude-penalty erhoehen), group_reg aktivieren/erhoehen.
+
+Hard-Thresholding nach dem Training (z. B. |beta| < 1e-2 auf 0 setzen) + diesen Schwellenwert per Validation waehlen.
+
+ggf. gamma in IRLS/Adaptive-Weights erhoehen (aggressiveres Shrinking).
 
 TODO:
 - Write down the formulas for synthetic datasets

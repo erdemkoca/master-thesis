@@ -126,7 +126,8 @@ def run_nimoNew(
     T              = 15,
     early_tol      = 1e-4,
     group_reg_cv   = False,
-    group_reg_vals = (0.0, 0.1, 0.5, 1.0)
+    group_reg_vals = (0.0, 0.1, 0.5, 1.0),
+    X_val=None, y_val=None
 ):
     """
     NIMO Variant mit:
@@ -273,11 +274,18 @@ def run_nimoNew(
     # --- 5) Evaluation & Threshold-Search ---
     model.eval()
     with torch.no_grad():
-        probs = model.predict_proba(X_test_t).cpu().numpy()
+        prob_val = model.predict_proba(torch.tensor(X_val, dtype=torch.float32)).cpu().numpy() if X_val is not None else None
+        prob_te  = model.predict_proba(torch.tensor(X_test, dtype=torch.float32)).cpu().numpy()
+
     thresholds = np.linspace(0.0, 1.0, 1001)  # Feineres Grid
-    f1s        = [f1_score(y_test, (probs>=thr).astype(int)) for thr in thresholds]
-    bi         = int(np.argmax(f1s))
-    thr        = thresholds[bi]
+    if prob_val is not None:
+        idx = int(np.argmax([f1_score(y_val, (prob_val>=t).astype(int)) for t in thresholds]))
+        thr = float(thresholds[idx])
+    else:
+        idx = int(np.argmax([f1_score(y_test, (prob_te>=t).astype(int)) for t in thresholds]))
+        thr = float(thresholds[idx])
+
+    y_pred = (prob_te >= thr).astype(int)
 
     # --- 6) Support aus Beta (ohne Intercept) ---
     beta_coefs = model.beta.detach().cpu().numpy()[1:]
@@ -295,11 +303,11 @@ def run_nimoNew(
             # setze temporaer Beta mit Threshold fuer Val-Prognose
             full_beta = model.beta.detach().clone()
             full_beta[1:] = torch.tensor(beta_tau, dtype=full_beta.dtype)
-            logits = model.forward(torch.tensor(X_va, dtype=torch.float32)).matmul(full_beta.unsqueeze(1)).squeeze(1)
+            logits = model.forward(torch.tensor(X_val, dtype=torch.float32)).matmul(full_beta.unsqueeze(1)).squeeze(1)
             probs  = torch.sigmoid(logits).cpu().numpy()
         # F1 auf Val (feines Grid fuer Klassifikationsschwelle)
         ths = np.linspace(0.0,1.0,1001)
-        f1s = [f1_score(y_va, (probs>=t).astype(int), zero_division=0) for t in ths]
+        f1s = [f1_score(y_val, (probs>=t).astype(int), zero_division=0) for t in ths]
         f1v = max(f1s)
         # simple Auswahl: maximaler Val-F1 bei moeglichst kleiner nnz
         nnz_tau = int((np.abs(beta_tau) > 0).sum())
@@ -353,9 +361,9 @@ def run_nimoNew(
         'model_name':        'nimoNew',
         'iteration':          iteration,
         'best_threshold':    thr,
-        'best_f1':           f1s[bi],
-        'y_pred':            (probs>=thr).astype(int).tolist(),
-        'y_prob':            probs.tolist(),
+        'best_f1':           f1_score(y_test, y_pred),
+        'y_pred':            y_pred.tolist(),
+        'y_prob':            prob_te.tolist(),
         'selected_features': sel,
         'method_has_selection': True,
         'n_selected':        len(sel),

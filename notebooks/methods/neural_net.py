@@ -54,7 +54,7 @@ class SimpleNN(nn.Module):
         return self.fc3(x)
 
 
-def run_neural_net(X_train, y_train, X_test, y_test, iteration, randomState, X_columns=None):
+def run_neural_net(X_train, y_train, X_test, y_test, iteration, randomState, X_columns=None, X_val=None, y_val=None):
     """
     Training und Evaluierung eines einfachen Neural Net:
       1. Daten in Torch-Tensoren umwandeln

@@ -56,7 +56,7 @@ def custom_sparsity_score(estimator, X, y):
     
     return f1
 
-def run_lasso(X_train, y_train, X_test, y_test, iteration, randomState, X_columns):
+def run_lasso(X_train, y_train, X_test, y_test, iteration, randomState, X_columns, X_val=None, y_val=None):
     param_grid = {
         'C': [0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5,
               0.6, 0.7, 0.8, 0.9, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5,
@@ -82,13 +82,24 @@ def run_lasso(X_train, y_train, X_test, y_test, iteration, randomState, X_column
     best_model = clf.best_estimator_
     y_probs = best_model.predict_proba(X_test)[:, 1]
 
-    # Fine-grained threshold optimization (0.001 step)
-    thresholds = np.linspace(0.000, 1.000, 1001)
-    f1_scores = [f1_score(y_test, (y_probs >= t).astype(int), zero_division=0) for t in thresholds]
-    best_idx = int(np.argmax(f1_scores))
-    best_threshold = thresholds[best_idx]
-    best_f1 = f1_scores[best_idx]
-    y_pred = (y_probs >= best_threshold).astype(int)
+    # Fine-grained threshold optimization (1001 steps)
+    thresholds = np.linspace(0.0, 1.0, 1001)
+    
+    if X_val is not None and y_val is not None:
+        # Threshold auf Validation wählen
+        y_val_prob = best_model.predict_proba(X_val)[:,1]
+        idx = np.argmax([f1_score(y_val, (y_val_prob>=t).astype(int), zero_division=0) for t in thresholds])
+        best_threshold = float(thresholds[idx])
+    else:
+        # Fallback (wenn kein Val): wie bisher, aber 1001 Stufen
+        y_test_prob_tmp = best_model.predict_proba(X_test)[:,1]
+        idx = np.argmax([f1_score(y_test, (y_test_prob_tmp>=t).astype(int), zero_division=0) for t in thresholds])
+        best_threshold = float(thresholds[idx])
+    
+    # Testauswertung mit best_threshold
+    y_test_prob = best_model.predict_proba(X_test)[:,1]
+    y_pred = (y_test_prob >= best_threshold).astype(int)
+    best_f1 = f1_score(y_test, y_pred, zero_division=0)
     precision = precision_score(y_test, y_pred, zero_division=0)
     recall = recall_score(y_test, y_pred, zero_division=0)
 

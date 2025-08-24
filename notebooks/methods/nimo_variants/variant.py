@@ -121,7 +121,8 @@ def run_nimo_variant(
       group_reg=0.0, lr=1e-3, T=10,
       early_stopping_tol=1e-4,
       group_reg_cv=False,
-      group_reg_values=(0.0,0.1,0.5,1.0)
+      group_reg_values=(0.0,0.1,0.5,1.0),
+      X_val=None, y_val=None
 ):
     """
     NIMO Variant with:
@@ -245,11 +246,18 @@ def run_nimo_variant(
     # --- Evaluation ---
     model.eval()
     with torch.no_grad():
-        probs = model.predict_proba(X_test_t).cpu().numpy()
-    thresholds = np.linspace(0,1,100)
-    f1s = [f1_score(y_test, (probs >= thr).astype(int)) for thr in thresholds]
-    best_idx = int(np.argmax(f1s))
-    best_thr = thresholds[best_idx]
+        prob_val = model.predict_proba(torch.tensor(X_val, dtype=torch.float32)).cpu().numpy() if X_val is not None else None
+        prob_te  = model.predict_proba(torch.tensor(X_test, dtype=torch.float32)).cpu().numpy()
+
+    thresholds = np.linspace(0.0, 1.0, 1001)
+    if prob_val is not None:
+        idx = int(np.argmax([f1_score(y_val, (prob_val>=t).astype(int)) for t in thresholds]))
+        best_thr = float(thresholds[idx])
+    else:
+        idx = int(np.argmax([f1_score(y_test, (prob_te>=t).astype(int)) for t in thresholds]))
+        best_thr = float(thresholds[idx])
+
+    y_pred = (prob_te >= best_thr).astype(int)
 
     # --- Feature Selection via Beta Coeffs ---
     beta_coeffs = model.beta.detach().cpu().numpy()[1:]
@@ -269,9 +277,9 @@ def run_nimo_variant(
         'model_name':'nimo_variant',
         'iteration':iteration,
         'best_threshold':best_thr,
-        'best_f1':f1s[best_idx],
-        'y_pred':(probs>=best_thr).astype(int).tolist(),
-        'y_prob':probs.tolist(),
+        'best_f1':f1_score(y_test, y_pred),
+        'y_pred':y_pred.tolist(),
+        'y_prob':prob_te.tolist(),
         'selected_features':selected_features,
         'method_has_selection':True,
         'n_selected':len(selected_features),
