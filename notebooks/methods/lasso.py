@@ -1,4 +1,5 @@
 import numpy as np
+import json
 from sklearn.linear_model import LogisticRegressionCV
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
@@ -88,7 +89,7 @@ def run_lasso(
         "y_pred": y_pred.tolist(),
 
         # STANDARDIZED-space coefficients (primary output)
-        "coefficients": {
+        "coefficients": json.dumps({
             "space": "standardized",
             "intercept": intercept_std,
             "values": beta_for_sel.tolist(),          # for selection
@@ -97,7 +98,7 @@ def run_lasso(
             "coef_threshold_applied": float(tau_report),
             "mean": mu.tolist(),
             "scale": s.tolist()
-        },
+        }),
 
         # selection summary
         "n_selected": int(sum(sel_mask)),

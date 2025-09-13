@@ -11,9 +11,12 @@ DATASETS = [
     {"kind": "synthetic", "id": "C", "path": "../data/synthetic", "n_train": 140, "n_val": 60, "desc": "Linear + univariate nonlinearity (low-dim)"},
     {"kind": "synthetic", "id": "D", "path": "../data/synthetic", "n_train": 140, "n_val": 60, "desc": "Linear + interactions + nonlinearity (high-dim)"},
     
-    # Real datasets (add your real datasets here)
-    # {"kind": "real", "id": "breast_cancer", "path": "../data/real/bc", "n_train": 140, "n_val": 60, "desc": "Breast Cancer Wisconsin"},
-    # {"kind": "real", "id": "diabetes", "path": "../data/real/diabetes", "n_train": 140, "n_val": 60, "desc": "Pima Indians Diabetes"},
+    # Real datasets
+    {"kind": "real", "id": "breast_cancer", "path": "../data/real/breast_cancer/processed", "n_train": 140, "n_val": 60, "desc": "Breast Cancer Wisconsin"},
+    {"kind": "real", "id": "pima", "path": "../data/real/pima/processed", "n_train": 140, "n_val": 60, "desc": "Pima Indians Diabetes"},
+    {"kind": "real", "id": "bank_marketing", "path": "../data/real/bank_marketing/processed", "n_train": 140, "n_val": 60, "desc": "Bank Marketing"},
+    {"kind": "real", "id": "credit_default", "path": "../data/real/credit_default/processed", "n_train": 140, "n_val": 60, "desc": "Credit Card Default"},
+    {"kind": "real", "id": "spambase", "path": "../data/real/spambase/processed", "n_train": 140, "n_val": 60, "desc": "Spambase"},
 ]
 
 def get_dataset_by_id(dataset_id):

@@ -37,52 +37,30 @@ def load_synth(sid, path):
 def load_real(did, path):
     """
     Load real dataset by dataset ID.
-    Creates fixed test/pool split on first run and saves indices.
+    Assumes the dataset has been preprocessed and saved in the expected format.
     
     Args:
-        did: Dataset ID (e.g., "breast_cancer", "diabetes")
-        path: Path to real data directory
+        did: Dataset ID (e.g., "breast_cancer", "pima")
+        path: Path to processed real data directory
         
     Returns:
         X, y, idx_test, idx_pool, meta
     """
-    # Load data
-    X = np.load(f"{path}/X.npy")
-    y = np.load(f"{path}/y.npy")
+    # Load preprocessed data
+    X = np.load(f"{path}/X_full.npy")
+    y = np.load(f"{path}/y_full.npy")
+    idx_test = np.load(f"{path}/idx_test_big.npy")
+    idx_pool = np.load(f"{path}/idx_pool.npy")
     
-    # Create fixed test/pool split if it doesn't exist
-    test_path = f"{path}/idx_test_big.npy"
-    pool_path = f"{path}/idx_pool.npy"
+    # Load feature names and metadata
+    with open(f"{path}/feature_names.json", "r") as f:
+        feat_names = json.load(f)
     
-    if not os.path.exists(test_path) or not os.path.exists(pool_path):
-        print(f"Creating fixed test/pool split for {did}...")
-        idx = np.arange(len(y))
-        idx_pool, idx_test = train_test_split(
-            idx, 
-            test_size=0.5, 
-            stratify=y, 
-            random_state=42
-        )
-        np.save(test_path, idx_test)
-        np.save(pool_path, idx_pool)
-        print(f"Saved test indices: {len(idx_test)} samples")
-        print(f"Saved pool indices: {len(idx_pool)} samples")
-    else:
-        idx_test = np.load(test_path)
-        idx_pool = np.load(pool_path)
+    with open(f"{path}/metadata.json", "r") as f:
+        meta = json.load(f)
     
-    # Create metadata
-    feat_names = [f"feature_{i}" for i in range(X.shape[1])]
-    meta = {
-        "feature_names": feat_names,
-        "desc": did,
-        "n_samples": len(y),
-        "n_features": X.shape[1],
-        "class_distribution": {
-            "class_0": int(np.sum(y == 0)),
-            "class_1": int(np.sum(y == 1))
-        }
-    }
+    # Ensure feature_names is in meta
+    meta["feature_names"] = feat_names
     
     return X, y, idx_test, idx_pool, meta
 

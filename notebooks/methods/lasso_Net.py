@@ -1,4 +1,5 @@
 import numpy as np
+import json
 from lassonet import LassoNetClassifierCV
 from sklearn.metrics import f1_score, accuracy_score
 from sklearn.preprocessing import StandardScaler
@@ -131,7 +132,7 @@ def run_lassonet(X_train, y_train, X_test, y_test,
         'y_prob': y_probs.tolist(),
         
         # coefficients structure (if available)
-        'coefficients': coefficients,
+        'coefficients': json.dumps(coefficients),
         
         # selection summary
         'selected_features': selected_features,

@@ -38,7 +38,7 @@ def run_all_methods(X_tr, y_tr, X_va, y_va, X_te, y_te, seed, feature_names, dat
     """
     methods = [
         ("lasso", run_lasso),
-        ("lassonet", run_lassonet), 
+        #("lassonet", run_lassonet),
         ("nimo", run_nimo)
     ]
     
@@ -138,14 +138,43 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/all"):
                 "n_pool_samples": len(idx_pool)
             }
             
+            # Add unified scenario-like metadata for plotting compatibility
+            scenario_descriptions = {
+                'A': 'Linear (low-dim, 20 features)',
+                'B': 'Linear (high-dim, 200 features)', 
+                'C': 'Linear + univariate nonlinearity (low-dim, 20 features)',
+                'D': 'Linear + interactions + nonlinearity (high-dim, 200 features)',
+                'breast_cancer': 'Breast Cancer Wisconsin (569 samples, 30 features)',
+                'pima': 'Pima Indians Diabetes (768 samples, 8 features)',
+                'bank_marketing': 'Bank Marketing (11,161 samples, 50 features)',
+                'credit_default': 'Credit Card Default (30,000 samples, 90 features)',
+                'spambase': 'Spambase (4,601 samples, 57 features)'
+            }
+            
+            # Add scenario-like fields for unified plotting
+            dataset_info.update({
+                "scenario": entry["id"],  # Use dataset_id as scenario
+                "scenario_description": scenario_descriptions.get(entry["id"], entry.get("desc", "")),
+                "scenario_title": f"Scenario {entry['id']}: {scenario_descriptions.get(entry['id'], entry.get('desc', ''))}"
+            })
+            
             # Add true support info for synthetic data
             if entry["kind"] == "synthetic":
                 true_support = meta.get("true_support", [])
-                beta_true = meta.get("beta_true", [])
+                beta_nonzero = meta.get("beta_nonzero", {})
+                # Convert beta_nonzero dict to list in the correct order
+                beta_true = [beta_nonzero.get(str(i), 0.0) for i in range(len(true_support))]
                 dataset_info.update({
                     "n_true_features": len(true_support),
                     "true_support": json.dumps(true_support),
                     "beta_true": json.dumps(beta_true)
+                })
+            else:
+                # For real datasets, add empty true support info for plotting compatibility
+                dataset_info.update({
+                    "n_true_features": 0,
+                    "true_support": json.dumps([]),
+                    "beta_true": json.dumps([])
                 })
             
             # Run iterations
@@ -257,4 +286,4 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/all"):
 
 if __name__ == "__main__":
     # Run with default settings
-    df = main(n_iterations=5)  # Start with 5 iterations for testing
+    df = main(n_iterations=10)  # Start with 5 iterations for testing

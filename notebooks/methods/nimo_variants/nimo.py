@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+import json
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import f1_score, accuracy_score
 
@@ -328,7 +329,7 @@ def run_nimo(
         "accuracy": acc,
         "threshold": thr,
 
-        "coefficients": {
+        "coefficients": json.dumps({
             "space": "standardized",
             "intercept": intercept_std,
             "values": beta_for_sel.tolist(),            # selection view
@@ -337,8 +338,9 @@ def run_nimo(
             "coef_threshold_applied": float(tau_beta_report),
             "mean": scaler.mean_.tolist(),
             "scale": scaler.scale_.tolist(),
-        },
+        }),
         "selection": {"mask": selected_mask, "features": selected_features},
+        "n_selected": len(selected_features),
 
         "decomposition_val": decomp_val,
         "decomposition_test": decomp_test,
