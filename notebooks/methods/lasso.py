@@ -58,24 +58,20 @@ def run_lasso(
     acc = float(accuracy_score(y_test, y_pred))
 
     # ---------------------------
-    # 5) Coefficients: std → raw
+    # 5) Coefficients: report standardized coefficients
     # ---------------------------
     intercept_std = float(clf.intercept_[0])
     beta_std = clf.coef_.ravel().astype(float)
 
-    # raw-space mapping
-    beta_raw = beta_std / s_safe
-    intercept_raw = intercept_std - np.sum(beta_std * (mu / s_safe))
+    # optional: post-hoc sparsity threshold IN STANDARDIZED UNITS
+    beta_for_sel = beta_std.copy()
+    if tau_report > 0:
+        beta_for_sel[np.abs(beta_for_sel) < tau_report] = 0.0
 
-    # optional reporting threshold in RAW space
-    beta_raw_report = beta_raw.copy()
-    if tau_report > 0.0:
-        beta_raw_report[np.abs(beta_raw_report) < tau_report] = 0.0
-
-    # selection (based on raw-space, tiny eps)
+    # selection (based on standardized coefficients)
     eps = 1e-12
-    sel_mask = (np.abs(beta_raw_report) > eps).astype(int).tolist()
-    selected = [name for name, c in zip(X_columns, beta_raw_report) if abs(c) > eps]
+    sel_mask = (np.abs(beta_for_sel) > eps).astype(int).tolist()
+    selected = [name for name, c in zip(X_columns, beta_for_sel) if abs(c) > eps]
 
     return {
         "model_name": "lasso",
@@ -91,20 +87,16 @@ def run_lasso(
         "y_prob": p_te.tolist(),
         "y_pred": y_pred.tolist(),
 
-        # RAW-space coefficients (use these for comparison with ground truth)
+        # STANDARDIZED-space coefficients (primary output)
         "coefficients": {
-            "intercept": float(intercept_raw),
-            "values": beta_raw_report.tolist(),           # thresholded view
-            "values_no_threshold": beta_raw.tolist(),     # pristine raw β
+            "space": "standardized",
+            "intercept": intercept_std,
+            "values": beta_for_sel.tolist(),          # for selection
+            "values_no_threshold": beta_std.tolist(), # raw (unthresholded) for plotting
             "feature_names": list(X_columns),
-            "coef_threshold_applied": float(tau_report)
-        },
-
-        # Also provide STD-space (in case you want it)
-        "coefficients_std": {
-            "intercept": float(intercept_std),
-            "values": beta_std.tolist(),
-            "feature_names": list(X_columns)
+            "coef_threshold_applied": float(tau_report),
+            "mean": mu.tolist(),
+            "scale": s.tolist()
         },
 
         # selection summary
@@ -117,7 +109,6 @@ def run_lasso(
         "hyperparams": {
             "C": float(clf.C_[0]),
             "penalty": "l1",
-            "solver": "liblinear",
-            "standardized": True
+            "solver": "liblinear"
         }
     }

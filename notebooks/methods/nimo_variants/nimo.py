@@ -301,17 +301,12 @@ def run_nimo(
             "rel_mod": np.mean(np.abs(Xva * g_val), axis=0).tolist(),
         }
 
-    # ---- 6) Map β back to RAW space and build selection from raw β
-    beta_std = model.beta.detach().cpu().numpy()[1:]     # coeffs for standardized inputs
-    b0_std   = float(model.beta.detach().cpu().numpy()[0])
+    # ---- 6) Report standardized coefficients (no conversion to RAW)
+    beta_std_all = model.beta.detach().cpu().numpy()   # [b0, b1..bd] for standardized X
+    intercept_std = float(beta_std_all[0])
+    beta_std = beta_std_all[1:].copy()
 
-    s  = scaler.scale_
-    mu = scaler.mean_
-
-    beta_raw = beta_std / s
-    b0_raw   = b0_std - float(np.dot(beta_raw, mu))
-
-    beta_for_sel = beta_raw.copy()
+    beta_for_sel = beta_std.copy()
     if tau_beta_report > 0:
         beta_for_sel[np.abs(beta_for_sel) < tau_beta_report] = 0.0
 
@@ -321,28 +316,27 @@ def run_nimo(
         else [j for j, m in enumerate(selected_mask) if m]
     )
 
-    # (optional) effective raw β using avg correction on *train* (will be ~same due to centering)
-    with torch.no_grad():
-        g_tr = model.corrections(torch.tensor(Xtr, dtype=torch.float32, device=device)).cpu().numpy()
-    beta_eff_raw = beta_raw * (1.0 + g_tr.mean(axis=0))  # mean ≈ 0 after centering
-
     # ---- 7) Results
-    feature_names = list(X_columns) if X_columns else [f"feature_{i}" for i in range(len(beta_raw))]
+    feature_names = list(X_columns) if X_columns else [f"feature_{i}" for i in range(len(beta_std))]
     result = {
         "model_name": "nimo",
         "iteration": iteration,
         "random_seed": randomState,
 
-        "metrics": {"f1": f1, "accuracy": acc},
+        # flat metrics for your existing plots
+        "f1": f1,
+        "accuracy": acc,
         "threshold": thr,
 
         "coefficients": {
-            "intercept": float(b0_raw),
-            "values": beta_raw.tolist(),                 # RAW-space linear β
-            "values_effective": beta_eff_raw.tolist(),   # includes avg modulation (near-equal due to centering)
+            "space": "standardized",
+            "intercept": intercept_std,
+            "values": beta_for_sel.tolist(),            # selection view
+            "values_no_threshold": beta_std.tolist(),   # unthresholded for plots
             "feature_names": feature_names,
             "coef_threshold_applied": float(tau_beta_report),
-            "scale": s.tolist(), "mean": mu.tolist()
+            "mean": scaler.mean_.tolist(),
+            "scale": scaler.scale_.tolist(),
         },
         "selection": {"mask": selected_mask, "features": selected_features},
 

@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""
+Clean Synthetic Data Generator - NIMO-inspired
+Generates simple, focused synthetic datasets for LASSO vs NIMO comparison.
+Uses fixed big test sets and stratified sampling.
+"""
+
+import numpy as np
+import json
+import os
+import shutil
+from scipy.special import expit
+
+# ===== Simple, NIMO-inspired scenarios =====
+SCENARIOS = {
+    "A": {  # Linear, low-dim
+        "p": 20, "sigma": 0.10, "b0": 0.0,
+        "beta": {0: 2.0, 1: -3.0, 2: 2.0, 3: -2.0, 4: 3.0},
+        "nl": [],
+        "desc": "Linear (low-dim)"
+    },
+    "B": {  # Linear, high-dim (p >> n)
+        "p": 200, "sigma": 0.12, "b0": 0.0,
+        "beta": {0: 2.0, 1: -3.0, 2: 2.0, 3: -2.0, 4: 3.0},
+        "nl": [],
+        "desc": "Linear (high-dim)"
+    },
+    "C": {  # Linear + simple univariate nonlinearities, low-dim
+        "p": 20, "sigma": 0.15, "b0": 0.0,
+        "beta": {0: 2.0, 1: -3.0, 2: 2.0, 3: -2.0, 4: 3.0},
+        "nl": [("sin", 0, 1.0), ("sin", 1, 0.8), ("sqc", 2, 1.0)],  # sqc: x^2 - 1
+        "desc": "Linear + univariate nonlinearity (low-dim)"
+    },
+    "D": {  # Mixed interactions + nonlinearity, high-dim
+        "p": 200, "sigma": 0.20, "b0": 0.0,
+        "beta": {0: 2.0, 1: -3.0, 2: 2.0, 3: -2.0, 4: 3.0},
+        "nl": [("sin", 0, 0.8), ("sin", 1, 0.8), ("sqc", 2, 0.8),
+               ("int", 0, 1, 1.2), ("int", 2, 3, -1.0)],
+        "desc": "Linear + interactions + nonlinearity (high-dim)"
+    },
+}
+
+def gen_data(n, spec):
+    """Generate synthetic data according to specification."""
+    rng = np.random.default_rng(42)
+    p, sigma, b0 = spec["p"], spec["sigma"], spec.get("b0", 0.0)
+
+    # Create beta vector
+    beta = np.zeros(p)
+    for j, v in spec["beta"].items():
+        beta[j] = float(v)
+
+    # Generate features: X ~ N(0,1), independent
+    X = rng.normal(size=(n, p))
+
+    # Linear predictor: η = b0 + β^T x
+    eta = b0 + X @ beta
+
+    # Add nonlinear terms
+    for term in spec["nl"]:
+        kind = term[0]
+        if kind == "int":     # ( "int", i, j, w )
+            _, i, j, w = term
+            eta += float(w) * (X[:, int(i)] * X[:, int(j)])
+        elif kind == "sin":   # ( "sin", j, w )
+            _, j, w = term
+            eta += float(w) * np.sin(X[:, int(j)])
+        elif kind == "sqc":   # ( "sqc", j, w ) - centered square: x^2 - 1
+            _, j, w = term
+            xj = X[:, int(j)]
+            eta += float(w) * (xj * xj - 1.0)
+        else:
+            raise ValueError(f"Unknown nonlinear term type: {kind}")
+
+    # Additive Gaussian logit noise (NIMO-style)
+    eta += rng.normal(0.0, sigma, size=n)
+
+    # Generate labels: y ~ Bernoulli(σ(η))
+    y = rng.binomial(1, expit(eta))
+
+    # True support is the non-zero beta indices
+    true_support = np.where(beta != 0)[0].tolist()
+    
+    return X, y, beta, true_support
+
+def make_fixed_test_indices(y, test_frac=0.5, seed=123):
+    """Create stratified fixed big test set; returns (idx_test, idx_pool)."""
+    rng = np.random.default_rng(seed)
+    y = np.asarray(y)
+    
+    # Get indices for each class
+    idx0, idx1 = np.where(y == 0)[0], np.where(y == 1)[0]
+    rng.shuffle(idx0)
+    rng.shuffle(idx1)
+
+    # Stratified split
+    k0 = int(round(test_frac * len(idx0)))
+    k1 = int(round(test_frac * len(idx1)))
+    
+    idx_test = np.concatenate([idx0[:k0], idx1[:k1]])
+    idx_pool = np.concatenate([idx0[k0:], idx1[k1:]])
+    
+    # Shuffle final indices
+    rng.shuffle(idx_test)
+    rng.shuffle(idx_pool)
+    
+    return idx_test, idx_pool
+
+def main():
+    """Generate and save all synthetic datasets."""
+    
+    # Clean output directory
+    output_dir = "../data/synthetic"
+    if os.path.exists(output_dir):
+        print(f"🗑️  Cleaning existing data in {output_dir}")
+        shutil.rmtree(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+
+    print("="*60)
+    print("CLEAN SYNTHETIC DATA GENERATOR - NIMO-INSPIRED")
+    print("="*60)
+    print(f"Scenarios: {list(SCENARIOS.keys())}")
+    print(f"Output directory: {output_dir}")
+    print()
+
+    # Fixed parameters
+    n_full = 10000   # Large pool to carve out a big fixed test set
+    seed = 42
+
+    for scenario_name, spec in SCENARIOS.items():
+        print(f"Generating Scenario {scenario_name}: {spec['desc']}")
+        
+        # Generate data
+        X, y, beta, true_support = gen_data(n_full, spec)
+        
+        # Create fixed big test set (stratified) + pool for train/val sampling
+        idx_test, idx_pool = make_fixed_test_indices(y, test_frac=0.5, seed=seed+7)
+        
+        # Save arrays and indices
+        np.save(f"{output_dir}/scenario_{scenario_name}_X_full.npy", X)
+        np.save(f"{output_dir}/scenario_{scenario_name}_y_full.npy", y.astype(int))
+        np.save(f"{output_dir}/scenario_{scenario_name}_idx_test_big.npy", idx_test)
+        np.save(f"{output_dir}/scenario_{scenario_name}_idx_pool.npy", idx_pool)
+        
+        # Minimal metadata
+        metadata = {
+            "scenario": scenario_name,
+            "desc": spec["desc"],
+            "p": spec["p"],
+            "sigma": spec["sigma"],
+            "b0": spec.get("b0", 0.0),
+            "beta_nonzero": {int(k): float(v) for k, v in spec["beta"].items()},
+            "nl": spec["nl"],
+            "true_support": true_support,
+            "n_full": n_full,
+            "sizes": {"test_big": len(idx_test), "pool": len(idx_pool)},
+            "class_dist_full": np.bincount(y).tolist()
+        }
+        
+        with open(f"{output_dir}/scenario_{scenario_name}_metadata.json", "w") as f:
+            json.dump(metadata, f, indent=2)
+        
+        print(f"  ✓ Saved data and metadata for scenario {scenario_name}")
+        print(f"    Full: {X.shape[0]} samples, Features: {X.shape[1]}")
+        print(f"    Test set: {len(idx_test)} samples, Pool: {len(idx_pool)} samples")
+        print(f"    True support: {true_support}")
+        print(f"    Beta: {[f'{beta[i]:.1f}' for i in true_support]}")
+        print(f"    Class distribution: {np.bincount(y)}")
+        print()
+
+    print("="*60)
+    print("CLEAN DATA GENERATION COMPLETED")
+    print("="*60)
+    print(f"All datasets saved to: {output_dir}")
+    print("Ready for experiments!")
+    print()
+    print("Usage in experiment loop:")
+    print("  X = np.load('.../scenario_A_X_full.npy')")
+    print("  y = np.load('.../scenario_A_y_full.npy')")
+    print("  idx_test = np.load('.../scenario_A_idx_test_big.npy')")
+    print("  idx_pool = np.load('.../scenario_A_idx_pool.npy')")
+    print("  # Sample train/val from idx_pool for each run")
+
+if __name__ == "__main__":
+    main()

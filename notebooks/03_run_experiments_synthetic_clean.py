@@ -18,7 +18,7 @@ from methods.lasso_Net import run_lassonet
 from methods.utils import standardize_method_output
 
 # Constants for easy tuning
-N_ITERATIONS = 30
+N_ITERATIONS = 2
 N_TRAIN = 140
 N_VAL = 60
 

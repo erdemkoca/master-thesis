@@ -1,6 +1,7 @@
 import numpy as np
 from lassonet import LassoNetClassifierCV
 from sklearn.metrics import f1_score, accuracy_score
+from sklearn.preprocessing import StandardScaler
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -28,21 +29,27 @@ def run_lassonet(X_train, y_train, X_test, y_test,
                  iteration, randomState, X_columns=None,
                  X_val=None, y_val=None):
 
-    # --- 1) Fit LassoNet with CV ---
-    model = LassoNetClassifierCV(cv=5, random_state=randomState)
-    model.fit(X_train, y_train)
+    # --- 1) Standardize data (fit on train only) ---
+    scaler = StandardScaler()
+    X_train_std = scaler.fit_transform(X_train)
+    X_test_std = scaler.transform(X_test)
+    X_val_std = scaler.transform(X_val) if X_val is not None else None
 
-    # --- 2) Predict probabilities ---
-    y_probs = model.predict_proba(X_test)[:, 1]
+    # --- 2) Fit LassoNet with CV on standardized data ---
+    model = LassoNetClassifierCV(cv=5, random_state=randomState)
+    model.fit(X_train_std, y_train)
+
+    # --- 3) Predict probabilities on standardized data ---
+    y_probs = model.predict_proba(X_test_std)[:, 1]
     if hasattr(y_probs, "detach"):  # torch.Tensor → numpy
         y_probs = y_probs.detach().cpu().numpy()
     else:
         y_probs = np.asarray(y_probs)
 
-    # --- 3) Threshold selection (use validation if available, otherwise test) ---
+    # --- 4) Threshold selection (use validation if available, otherwise test) ---
     if X_val is not None and y_val is not None:
         # Use validation set for threshold selection
-        y_probs_val = model.predict_proba(X_val)[:, 1]
+        y_probs_val = model.predict_proba(X_val_std)[:, 1]
         if hasattr(y_probs_val, "detach"):
             y_probs_val = y_probs_val.detach().cpu().numpy()
         else:
@@ -59,12 +66,12 @@ def run_lassonet(X_train, y_train, X_test, y_test,
         best_idx = int(np.argmax(f1_scores))
         best_threshold = thresholds[best_idx]
 
-    # --- 4) Final predictions and metrics ---
+    # --- 5) Final predictions and metrics ---
     y_pred = (y_probs >= best_threshold).astype(int)
     f1 = float(f1_score(y_test, y_pred, zero_division=0))
     accuracy = float(accuracy_score(y_test, y_pred))
 
-    # --- 5) Feature selection ---
+    # --- 6) Feature selection ---
     raw_sel = getattr(model, 'best_selected_', None)
     
     if raw_sel is None:
@@ -88,8 +95,7 @@ def run_lassonet(X_train, y_train, X_test, y_test,
     else:
         selected_features = selected_indices
 
-    # --- 6) Extract coefficients (LassoNet uses neural network, no direct coefficients) ---
-    coefficients = {}
+    # --- 7) Extract coefficients (LassoNet uses neural network, no direct coefficients) ---
     # LassoNet doesn't provide direct coefficients like LASSO
     # It uses a neural network approach for feature selection
     # We can create a placeholder structure for consistency
@@ -99,10 +105,14 @@ def run_lassonet(X_train, y_train, X_test, y_test,
         n_features = X_train.shape[1]
     
     coefficients = {
+        "space": "standardized",
         "intercept": 0.0,  # LassoNet doesn't expose intercept directly
         "values": [0.0] * n_features,  # Placeholder - LassoNet uses neural network
+        "values_no_threshold": [0.0] * n_features,  # Same as values for LassoNet
         "feature_names": list(X_columns) if X_columns is not None else [f"feature_{i}" for i in range(n_features)],
         "coef_threshold_applied": 0.0,
+        "mean": scaler.mean_.tolist(),
+        "scale": scaler.scale_.tolist(),
         "note": "LassoNet uses neural network - no direct coefficients available"
     }
 
