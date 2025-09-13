@@ -9,7 +9,7 @@ from methods.nimo_variants.variant import run_nimo_variant
 import os
 import json
 
-from notebooks.methods.nimo_variants.nimoNew import run_nimoNew
+from notebooks.methods.nimo_variants.nimo import run_nimo
 
 # Load split data
 print("Loading data...")
@@ -61,7 +61,7 @@ for iteration in range(20):
         # run_neural_net,
         # run_nimo_baseline,
         run_nimo_variant,
-        run_nimoNew
+        run_nimo
     ]
 
     randomState = int(rng.integers(0, 2**32 - 1))

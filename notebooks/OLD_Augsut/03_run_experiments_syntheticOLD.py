@@ -19,7 +19,7 @@ from methods.random_forest import run_random_forest
 from methods.neural_net import run_neural_net
 from methods.nimo_variants.baseline import run_nimo_baseline
 from methods.nimo_variants.variant import run_nimo_variant
-from methods.nimo_variants.nimoNew import run_nimoNew
+from methods.nimo_variants.nimo import run_nimo
 from methods.utils import to_native, standardize_method_output
 from methods.neural_net2 import run_neural_net2
 
@@ -33,10 +33,10 @@ def _md5_bytes(*arrays):
 
 
 # Create results directories
-os.makedirs("../results/synthetic/", exist_ok=True)
-os.makedirs("../results/synthetic/preds/", exist_ok=True)
-os.makedirs("../results/synthetic/features/", exist_ok=True)
-os.makedirs("../results/synthetic/convergence/", exist_ok=True)
+os.makedirs("../../results/synthetic/", exist_ok=True)
+os.makedirs("../../results/synthetic/preds/", exist_ok=True)
+os.makedirs("../../results/synthetic/features/", exist_ok=True)
+os.makedirs("../../results/synthetic/convergence/", exist_ok=True)
 
 # 1) Define scenarios with detailed descriptions
 scenarios = {
@@ -48,35 +48,41 @@ scenarios = {
         'nonlinear': None,
         'rho': 0.0,
         'noise': 'gaussian',
+        'logit_noise_std': 0.1,  # kontrolliertes Rauschen
+        'beta_scale': 5.0,        # Skalierung für β
         'description':       'Independent linear',
         'description_long':  'Basic linear model with independent features'
     },
-    # 'B': {
-    #     'n_samples': 200,
-    #     'n_features': 20,
-    #     'n_true_features': 5,
-    #     'interactions': [(0,1), (2,3)],
-    #     'nonlinear': None,
-    #     'rho': 0.0,
-    #     'noise': 'gaussian',
-    #     'description':       'Feature interactions',
-    #     'description_long':  'Linear model with feature interactions'
-    # },
-    # 'C': {
-    #     'n_samples': 200,
-    #     'n_features': 25,
-    #     'n_true_features': 0,
-    #     'interactions': None,
-    #     'nonlinear': (
-    #         [('sin', i) for i in range(5)]
-    #       + [('square', i) for i in range(5,10)]
-    #       + [('cube', i) for i in range(10,15)]
-    #     ),
-    #     'rho': 0.0,
-    #     'noise': 'gaussian',
-    #     'description':      'Pure nonlinear',
-    #     'description_long': 'No linear β·X. 5×sin(X), 5×X², 5×X³ + Gaussian noise'
-    # },
+    'B': {
+        'n_samples': 200,
+        'n_features': 20,
+        'n_true_features': 5,
+        'interactions': [(0,1), (2,3)],
+        'nonlinear': None,
+        'rho': 0.0,
+        'noise': 'gaussian',
+        'logit_noise_std': 0.15,  # etwas mehr Rauschen für Interaktionen
+        'beta_scale': 4.0,        # Skalierung für β
+        'description':       'Feature interactions',
+        'description_long':  'Linear model with feature interactions'
+    },
+    'C': {
+        'n_samples': 200,
+        'n_features': 25,
+        'n_true_features': 0,     # Keine linearen Features
+        'interactions': None,
+        'nonlinear': (
+            [('sin', i) for i in range(5)]
+          + [('square', i) for i in range(5,10)]
+          + [('cube', i) for i in range(10,15)]
+        ),
+        'rho': 0.0,
+        'noise': 'gaussian',
+        'logit_noise_std': 0.2,   # mehr Rauschen für reine Nichtlinearität
+        'beta_scale': 0.0,        # Keine linearen β (da n_true_features=0)
+        'description':      'Pure nonlinear',
+        'description_long': 'No linear β·X. 5×sin(X), 5×X², 5×X³ + Gaussian noise'
+    },
     # 'D': {
     #     'n_samples': 100,
     #     'n_features': 20,
@@ -291,29 +297,15 @@ from scipy.special import expit
 
 def generate_synthetic_data(n_samples=200, n_features=20, n_true_features=5,
                             interactions=None, nonlinear=None, rho=0.0,
-                            noise='gaussian', custom=None, seed=42):
+                            noise='gaussian', custom=None, seed=42,
+                            fixed_support=None, fixed_beta=None, logit_noise_std=0.0):
     """
     Generate synthetic data with various characteristics.
 
-    Args:
-        n_samples: Number of samples
-        n_features: Number of features
-        n_true_features: Number of truly important features
-        interactions: List of tuples (i,j) or (i,j,k) for interaction terms
-        nonlinear: List of tuples
-                   - (type, feature_idx)
-                   - (type, feature_idx, extra)
-                   or the string 'sawtooth'
-        rho: Correlation parameter for feature covariance
-        noise: 'gaussian', 'student_t', or 'gaussian_heavy'
-        custom: 'rbf' for RBF kernel features
-        seed: Random seed for reproducibility
-
-    Returns:
-        X: Feature matrix
-        y: Target vector
-        support: True support indices
-        beta_true: True linear coefficients (only for standard linear part)
+    NEW:
+      - fixed_support: array/list der wahren linearen Feature-Indizes (oder None)
+      - fixed_beta:    Länge n_features, die wahren linearen Koeffizienten (oder None)
+      - logit_noise_std: σ für additiven Gauss-Rauschterm auf den Logits (vor Sigmoid)
     """
     np.random.seed(seed)
 
@@ -345,30 +337,44 @@ def generate_synthetic_data(n_samples=200, n_features=20, n_true_features=5,
         beta_true    = np.zeros(n_features)
 
     else:
-        # 2b) Standard‐linear
-        beta_true = np.zeros(n_features)
-        support   = np.random.choice(n_features, size=n_true_features, replace=False)
-        beta_true[support] = np.random.uniform(1.0, 3.0, size=n_true_features)
-        linear_predictor   = X.dot(beta_true)
+        # 2b) Standard linearer Anteil: jetzt mit optional fixem Support/Beta
+        if fixed_beta is not None:
+            beta_true = np.asarray(fixed_beta, dtype=float)
+            assert beta_true.shape[0] == n_features
+            support = np.nonzero(beta_true)[0]
+        else:
+            beta_true = np.zeros(n_features)
+            if fixed_support is not None:
+                support = np.asarray(fixed_support, dtype=int)
+            else:
+                support = np.random.choice(n_features, size=n_true_features, replace=False)
+            beta_true[support] = np.random.uniform(1.0, 3.0, size=len(support))
+        linear_predictor = X.dot(beta_true)
 
-        # 3) Interaktionen
+        # 3) Interaktionen (nur zwischen wahren Support-Features)
         if interactions:
             coeffs_int = np.random.uniform(0.5, 1.5, size=len(interactions))
             for inter, coeff in zip(interactions, coeffs_int):
                 if len(inter) == 2:
                     i, j = inter
-                    linear_predictor += coeff * X[:, i] * X[:, j]
+                    # Prüfe, ob beide Features im wahren Support sind
+                    if i in support and j in support:
+                        linear_predictor += coeff * X[:, i] * X[:, j]
                 elif len(inter) == 3:
                     i, j, k = inter
-                    linear_predictor += coeff * X[:, i] * X[:, j] * X[:, k]
+                    # Prüfe, ob alle drei Features im wahren Support sind
+                    if i in support and j in support and k in support:
+                        linear_predictor += coeff * X[:, i] * X[:, j] * X[:, k]
 
-        # 4) Nicht‐Linearitäten
+        # 4) Nicht‐Linearitäten (nur auf wahren Support-Features)
         if nonlinear is not None:
             # a) String‑Spec 'sawtooth'
             if isinstance(nonlinear, str) and nonlinear.lower() == 'sawtooth':
                 import scipy.signal as sg
-                # wende Sawtooth pro Feature an (Periodenfaktor 5)
-                linear_predictor += np.sum(sg.sawtooth(5 * X, width=0.5), axis=1)
+                # Sawtooth nur auf Support-Features anwenden
+                support_X = X[:, support] if len(support) > 0 else X[:, :0]
+                if support_X.size > 0:
+                    linear_predictor += np.sum(sg.sawtooth(5 * support_X, width=0.5), axis=1)
 
             # b) Liste/Tupel‑Spec
             elif isinstance(nonlinear, (list, tuple)):
@@ -381,9 +387,13 @@ def generate_synthetic_data(n_samples=200, n_features=20, n_true_features=5,
                     elif len(spec) == 3:
                         transform, idx, extra = spec
                     else:
-                        raise ValueError(f"Ungültiges nonlinear‑Spec: {spec!r}")
+                        raise ValueError(f"Ungültiges nonlinear‑Spec: {nonlinear!r}")
 
-                    col = X[:, idx]
+                    # Prüfe, ob das Feature im wahren Support ist
+                    if int(idx) not in support:
+                        continue  # Überspringe Features außerhalb des Supports
+                    
+                    col = X[:, int(idx)]
                     if transform == 'sin':
                         linear_predictor += coeff * np.sin(col)
                     elif transform == 'square':
@@ -407,7 +417,11 @@ def generate_synthetic_data(n_samples=200, n_features=20, n_true_features=5,
             else:
                 raise ValueError(f"Ungültiges nonlinear‑Spec: {nonlinear!r}")
 
-    # 5) Rauschen & Zielvariable y
+    # 5) Logit-Rauschen (NEU): additiver Gauss-Term vor dem Sigmoid
+    if logit_noise_std and logit_noise_std > 0:
+        linear_predictor = linear_predictor + np.random.normal(0.0, float(logit_noise_std), size=n_samples)
+
+    # 6) Zielvariable y
     if noise == 'gaussian':
         p = expit(linear_predictor)
         y = np.random.binomial(1, p)
@@ -444,7 +458,7 @@ def split_data(X, y, test_size=0.3, seed=42):
 
 # Main experiment loop
 all_results = []
-n_iterations = 2
+n_iterations = 4
 
 print("="*60)
 print("SYNTHETIC DATA EXPERIMENT RUNNER")
@@ -461,7 +475,7 @@ methods = [
     #run_neural_net,
     #run_nimo_baseline,
     #run_nimo_variant,
-    #run_nimoNew,
+    run_nimo,
     #run_neural_net2
 ]
 
@@ -474,21 +488,46 @@ for scenario_name, params in scenarios.items():
     print(f"Description: {params['description']}")
     print(f"Parameters: {params}")
     
+    # --- GLOBALE Ground-Truth je Szenario festlegen (fix & konstant) ---
+    n_features = params['n_features']
+    k_true     = params.get('n_true_features', 0)
+    beta_scale = params.get('beta_scale', 5.0)  # ggf. in den Szenario-Parametern ergänzbar
+
+    if k_true > 0:
+        support_fixed = np.arange(k_true, dtype=int)  # z. B. die ersten k_true
+        beta_fixed    = np.zeros(n_features, dtype=float)
+        # alternierende Vorzeichen für Klarheit (+ - + - +)
+        signs = np.array([1 if i % 2 == 0 else -1 for i in range(k_true)], dtype=float)
+        beta_fixed[support_fixed] = beta_scale * signs
+    else:
+        support_fixed = np.array([], dtype=int)
+        beta_fixed    = np.zeros(n_features, dtype=float)
+
+    # kontrollierte Logit-Rauschstärke (klein halten in A)
+    logit_noise_std = float(params.get('logit_noise_std', 0.1))
+    
     # Generate data for this scenario
-    # Remove description from params for function call
+    # Remove description, beta_scale, and logit_noise_std from params for function call
     data_params = {
         k: v
         for k, v in params.items()
-        if not k.startswith('description')
+        if not k.startswith('description') and k != 'beta_scale' and k != 'logit_noise_std'
     }
-    # Generate initial data for scenario description (completely random)
-    X_full_init, y_full_init, true_support, beta_true = generate_synthetic_data(**data_params, seed=np.random.randint(0, 2**31-1))
+    # Generate initial data for scenario description (mit festen β)
+    X_full_init, y_full_init, true_support, beta_true = generate_synthetic_data(
+        **data_params,
+        seed=np.random.randint(0, 2**31-1),
+        fixed_support=support_fixed,
+        fixed_beta=beta_fixed,
+        logit_noise_std=logit_noise_std
+    )
     X_train_init, y_train_init, X_test_init, y_test_init = split_data(X_full_init, y_full_init, test_size=0.3, seed=np.random.randint(0, 2**31-1))
     
     print(f"Generated data:")
     print(f"  Total samples: {len(X_full_init)}")
     print(f"  Features: {X_full_init.shape[1]}")
-    print(f"  True support features: {sorted(true_support)}")
+    print(f"  True support features (FIXED): {sorted(true_support)}")
+    print(f"  Fixed support: {support_fixed.tolist()}")
     print(f"  Train samples: {len(X_train_init)}")
     print(f"  Test samples: {len(X_test_init)}")
     print(f"  Class distribution (train): {np.bincount(y_train_init)}")
@@ -497,14 +536,20 @@ for scenario_name, params in scenarios.items():
     # Create feature column names for synthetic data
     X_columns = [f'feature_{i}' for i in range(X_full_init.shape[1])]
     
-    # Datenparameter fuer das Szenario (ohne description)
-    data_params = {k:v for k,v in params.items() if not k.startswith('description')}
+    # Datenparameter fuer das Szenario (ohne description, beta_scale, logit_noise_std)
+    data_params = {k:v for k,v in params.items() if not k.startswith('description') and k != 'beta_scale' and k != 'logit_noise_std'}
 
     # Fixes Testset erzeugen und cachen
-    seed_test = int(np.random.randint(0, 2**31-1))
-    test_params = dict(data_params)
-    test_params['n_samples'] = 50_000  # grosses Testset
-    X_test_fixed, y_test_fixed, true_support_test, beta_true_test = generate_synthetic_data(**test_params, seed=seed_test)
+    seed_test  = int(np.random.randint(0, 2**31-1))
+    test_params = {k: v for k, v in params.items() if not k.startswith('description') and k != 'beta_scale' and k != 'logit_noise_std'}
+    test_params['n_samples'] = 50_000
+    X_test_fixed, y_test_fixed, true_support_test, beta_true_test = generate_synthetic_data(
+        **test_params,
+        seed=seed_test,
+        fixed_support=support_fixed,
+        fixed_beta=beta_fixed,
+        logit_noise_std=logit_noise_std
+    )
 
     test_hash = hash(X_test_fixed.tobytes()) ^ hash(y_test_fixed.tobytes())
 
@@ -515,8 +560,14 @@ for scenario_name, params in scenarios.items():
         # Generate completely random seed for this iteration (no reproducibility)
         seed_iter = int(np.random.randint(0, 2**31-1))
         
-        # Frische gesamte Trainingsdaten fuer diese Iteration
-        X_full_iter, y_full_iter, true_support_iter, beta_true_iter = generate_synthetic_data(**data_params, seed=seed_iter)
+        # Pro Iteration: Train/Val auch mit festen β generieren
+        X_full_iter, y_full_iter, true_support_iter, beta_true_iter = generate_synthetic_data(
+            **data_params,
+            seed=seed_iter,
+            fixed_support=support_fixed,
+            fixed_beta=beta_fixed,
+            logit_noise_std=logit_noise_std
+        )
 
         # Stratifizierter Train/Val-Split (z.B. 70/30)
         from sklearn.model_selection import StratifiedShuffleSplit
@@ -559,14 +610,29 @@ for scenario_name, params in scenarios.items():
             
             try:
                 print(f"      Calling {method_fn.__name__}...")
-                result = method_fn(
-                    X_train_iter, y_train_iter,
-                    X_test_fixed, y_test_fixed,                 # fixes Testset fuer alle
-                    iteration,
-                    seed_iter,
-                    X_columns,
-                    X_val=X_val_iter, y_val=y_val_iter          # NEU: Validation fuer Threshold
-                )
+                # Erweitere den Call nur für LASSO um optionale Debug-Flags
+                if method_fn is run_lasso:
+                    result = method_fn(
+                        X_train_iter, y_train_iter,
+                        X_test_fixed, y_test_fixed,
+                        iteration,
+                        seed_iter,
+                        X_columns,
+                        X_val=X_val_iter, y_val=y_val_iter,
+                        no_cv=False,            # True setzen, wenn du den Debug-Pfad testen willst
+                        C_fixed=None,           # z.B. 1e6 im Debug
+                        return_train_fit=True
+                    )
+                else:
+                    # unverändert für andere Methoden
+                    result = method_fn(
+                        X_train_iter, y_train_iter,
+                        X_test_fixed, y_test_fixed,                 # fixes Testset fuer alle
+                        iteration,
+                        seed_iter,
+                        X_columns,
+                        X_val=X_val_iter, y_val=y_val_iter          # NEU: Validation fuer Threshold
+                    )
                 print(f"      {method_fn.__name__} returned successfully")
                 
                 # Ensure all core fields exist and convert to native types
@@ -645,6 +711,13 @@ for scenario_name, params in scenarios.items():
                     'true_support_interaction': json.dumps(sorted(int(i) for i in true_interaction_idx)) if true_interaction_idx else None,
                     'true_support_nonlinear': json.dumps(sorted(int(i) for i in true_nonlinear_idx)) if true_nonlinear_idx else None,
                     'true_support_total': json.dumps([int(i) for i in true_union_idx]),
+                })
+                
+                # Logging erweitern (Wahrheiten & Noise)
+                metadata.update({
+                    'true_support_fixed': json.dumps([int(i) for i in support_fixed.tolist()]),
+                    'beta_true_fixed': json.dumps([float(b) for b in beta_fixed.tolist()]),
+                    'logit_noise_std': float(logit_noise_std)
                 })
                 
                 result.update(metadata)

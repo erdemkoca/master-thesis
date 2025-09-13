@@ -1,152 +1,123 @@
 import numpy as np
-import pandas as pd
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import GridSearchCV
-from sklearn.metrics import f1_score
-from sklearn.metrics import precision_score, recall_score
-from sklearn.pipeline import Pipeline
-from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegressionCV
+from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
-import sys
-import os
+from sklearn.metrics import f1_score, accuracy_score
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-try:
-    from utils import standardize_method_output
-except ImportError as e:
-    print(f"Import error in lasso.py: {e}")
+def run_lasso(
+    X_train, y_train, X_test, y_test, iteration, randomState, X_columns,
+    X_val=None, y_val=None,
+    Cs_logspace=(1e-3, 1e2, 15),
+    class_weight=None,
+    max_iter=5000, tol=1e-4,
+    tau_report=0.0     # post-hoc |beta| threshold for reporting (applied in RAW space)
+):
+    # ---------------------------
+    # 1) Standardize (fit on train only)
+    # ---------------------------
+    scaler = StandardScaler()
+    X_tr = scaler.fit_transform(X_train)
+    X_te = scaler.transform(X_test)
+    X_va = scaler.transform(X_val) if X_val is not None else None
+    mu = scaler.mean_
+    s = scaler.scale_
+    s_safe = np.where(s == 0.0, 1.0, s)  # guard (shouldn't happen with random Gaussian X)
 
+    # ---------------------------
+    # 2) CV L1-Logistic
+    # ---------------------------
+    Cs = np.logspace(np.log10(Cs_logspace[0]), np.log10(Cs_logspace[1]), Cs_logspace[2])
+    cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=randomState)
 
-    # Fallback: define a simple version
-    def standardize_method_output(result):
-        # Simple conversion to native types
-        import numpy as np
-        converted = {}
-        for k, v in result.items():
-            if isinstance(v, np.ndarray):
-                converted[k] = v.tolist()
-            elif isinstance(v, (np.integer, np.int64, np.int32, np.int16, np.int8)):
-                converted[k] = int(v)
-            elif isinstance(v, (np.floating, np.float64, np.float32, np.float16)):
-                converted[k] = float(v)
-            else:
-                converted[k] = v
-        return converted
+    clf = LogisticRegressionCV(
+        penalty='l1', solver='liblinear',
+        Cs=Cs, cv=cv, scoring='neg_log_loss',
+        class_weight=class_weight,
+        max_iter=max_iter, tol=tol, n_jobs=1, refit=True,
+        random_state=randomState
+    ).fit(X_tr, y_train)
 
-
-def custom_sparsity_score(estimator, X, y):
-    """
-    Custom scoring function that balances F1-score with sparsity.
-    Penalizes models that select too many features.
-    """
-    y_pred = estimator.predict(X)
-    f1 = f1_score(y, y_pred, zero_division=0)
-    
-    # Get coefficients directly (no pipeline)
-    coefs = estimator.coef_.flatten()
-    n_selected = np.sum(coefs != 0)
-    n_total = len(coefs)
-    sparsity_ratio = n_selected / n_total
-    
-    # Penalty for selecting too many features (encourage sparsity)
-    # If more than 50% of features are selected, apply penalty
-    if sparsity_ratio > 0.5:
-        penalty = 1.0 - (sparsity_ratio - 0.5) * 0.5  # Reduce score for high sparsity
-        f1 *= penalty
-    
-    return f1
-
-def run_lasso(X_train, y_train, X_test, y_test, iteration, randomState, X_columns, X_val=None, y_val=None):
-    param_grid = {
-        'C': [0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5,
-              0.6, 0.7, 0.8, 0.9, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5,
-              4.0, 4.5, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 15.0, 20.0,
-              25.0, 30.0, 35.0, 40.0, 45.0, 50.0, 55.0, 60.0, 65.0,
-              70.0, 75.0, 80.0, 85.0, 90.0, 95.0, 100.0, 150.0,
-              200.0, 250.0, 300.0, 400.0, 500.0],
-        'penalty': ['l1'],
-        'solver': ['liblinear']
-    }
-
-    # Use direct estimator (like the working version) - Pipeline interferes with L1 sparsity
-    clf = GridSearchCV(
-        LogisticRegression(max_iter=1000, random_state=randomState),
-        param_grid,
-        scoring=custom_sparsity_score,  # Use custom scoring that encourages sparsity
-        cv=5,  # Reduced CV for efficiency
-        n_jobs=-1,
-        verbose=0
-    )
-    clf.fit(X_train, y_train)
-
-    best_model = clf.best_estimator_
-    y_probs = best_model.predict_proba(X_test)[:, 1]
-
-    # Fine-grained threshold optimization (1001 steps)
-    thresholds = np.linspace(0.0, 1.0, 1001)
-    
-    if X_val is not None and y_val is not None:
-        # Threshold auf Validation wählen
-        y_val_prob = best_model.predict_proba(X_val)[:,1]
-        idx = np.argmax([f1_score(y_val, (y_val_prob>=t).astype(int), zero_division=0) for t in thresholds])
-        best_threshold = float(thresholds[idx])
+    # ---------------------------
+    # 3) Threshold from validation (fallback 0.5)
+    # ---------------------------
+    if X_va is not None and y_val is not None:
+        p_va = clf.predict_proba(X_va)[:, 1]
+        qs = np.linspace(0.0, 1.0, 101)
+        ths = np.unique(np.quantile(p_va, qs))
+        f1s = [f1_score(y_val, (p_va >= t).astype(int), zero_division=0) for t in ths]
+        best_thr = float(ths[int(np.argmax(f1s))])
     else:
-        # Fallback (wenn kein Val): wie bisher, aber 1001 Stufen
-        y_test_prob_tmp = best_model.predict_proba(X_test)[:,1]
-        idx = np.argmax([f1_score(y_test, (y_test_prob_tmp>=t).astype(int), zero_division=0) for t in thresholds])
-        best_threshold = float(thresholds[idx])
-    
-    # Testauswertung mit best_threshold
-    y_test_prob = best_model.predict_proba(X_test)[:,1]
-    y_pred = (y_test_prob >= best_threshold).astype(int)
-    best_f1 = f1_score(y_test, y_pred, zero_division=0)
-    precision = precision_score(y_test, y_pred, zero_division=0)
-    recall = recall_score(y_test, y_pred, zero_division=0)
+        best_thr = 0.5
 
-    # Ausgewählte Features (direct estimator)
-    coefs = best_model.coef_.flatten()
-    selected_features = [X_columns[i] for i, c in enumerate(coefs) if c != 0]
-    
-    # Sparsity analysis
-    n_total_features = len(coefs)
-    n_selected_features = len(selected_features)
-    sparsity_ratio = n_selected_features / n_total_features
-    coef_magnitudes = np.abs(coefs)
-    max_coef = np.max(coef_magnitudes)
-    min_nonzero_coef = np.min(coef_magnitudes[coef_magnitudes > 0]) if n_selected_features > 0 else 0
+    # ---------------------------
+    # 4) Test predictions/metrics
+    # ---------------------------
+    p_te = clf.predict_proba(X_te)[:, 1]
+    y_pred = (p_te >= best_thr).astype(int)
+    f1 = float(f1_score(y_test, y_pred, zero_division=0))
+    acc = float(accuracy_score(y_test, y_pred))
 
-    # Standardisierte Selection-Metadaten für Feature-Selection-Analyse
-    feature_names = list(X_columns)
-    selected_mask = [int(abs(c) > 1e-8) for c in coefs]
-    signs = [0 if abs(c) <= 1e-8 else (1 if c > 0 else -1) for c in coefs]
-    nnz = int(np.sum(np.abs(coefs) > 1e-8))
+    # ---------------------------
+    # 5) Coefficients: std → raw
+    # ---------------------------
+    intercept_std = float(clf.intercept_[0])
+    beta_std = clf.coef_.ravel().astype(float)
 
-    result = {
-        'model_name': 'lasso',
-        'iteration': iteration,
-        'best_f1': best_f1,
-        'best_threshold': best_threshold,
-        'y_pred': y_pred.tolist(),
-        'y_prob': y_probs.tolist(),
-        'precision': precision,
-        'recall': recall,
-        'selected_features': selected_features,
-        'method_has_selection': True,
-        'n_selected': len(selected_features),
-        'lasso_C': clf.best_params_['C'],
-        'lasso_coefs': best_model.coef_.flatten().tolist(),
-        # Sparsity metrics
-        'n_total_features': n_total_features,
-        'sparsity_ratio': sparsity_ratio,
-        'max_coefficient': max_coef,
-        'min_nonzero_coefficient': min_nonzero_coef,
-        'cv_score': clf.best_score_,  # The score from our custom sparsity function
-        # Standardisierte Selection-Metadaten
-        'feature_names': feature_names,
-        'coef_all': [float(c) for c in coefs],
-        'selected_mask': selected_mask,
-        'signs': signs,
-        'nnz': nnz
+    # raw-space mapping
+    beta_raw = beta_std / s_safe
+    intercept_raw = intercept_std - np.sum(beta_std * (mu / s_safe))
+
+    # optional reporting threshold in RAW space
+    beta_raw_report = beta_raw.copy()
+    if tau_report > 0.0:
+        beta_raw_report[np.abs(beta_raw_report) < tau_report] = 0.0
+
+    # selection (based on raw-space, tiny eps)
+    eps = 1e-12
+    sel_mask = (np.abs(beta_raw_report) > eps).astype(int).tolist()
+    selected = [name for name, c in zip(X_columns, beta_raw_report) if abs(c) > eps]
+
+    return {
+        "model_name": "lasso",
+        "iteration": iteration,
+        "random_seed": randomState,
+
+        # flat metrics for your existing plots
+        "f1": f1,
+        "accuracy": acc,
+        "threshold": best_thr,
+
+        # keep preds for persistence
+        "y_prob": p_te.tolist(),
+        "y_pred": y_pred.tolist(),
+
+        # RAW-space coefficients (use these for comparison with ground truth)
+        "coefficients": {
+            "intercept": float(intercept_raw),
+            "values": beta_raw_report.tolist(),           # thresholded view
+            "values_no_threshold": beta_raw.tolist(),     # pristine raw β
+            "feature_names": list(X_columns),
+            "coef_threshold_applied": float(tau_report)
+        },
+
+        # Also provide STD-space (in case you want it)
+        "coefficients_std": {
+            "intercept": float(intercept_std),
+            "values": beta_std.tolist(),
+            "feature_names": list(X_columns)
+        },
+
+        # selection summary
+        "n_selected": int(sum(sel_mask)),
+        "selection": {
+            "mask": sel_mask,
+            "features": selected
+        },
+
+        "hyperparams": {
+            "C": float(clf.C_[0]),
+            "penalty": "l1",
+            "solver": "liblinear",
+            "standardized": True
+        }
     }
-
-    return standardize_method_output(result)

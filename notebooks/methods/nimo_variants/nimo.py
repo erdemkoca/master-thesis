@@ -37,12 +37,11 @@ class NIMO(nn.Module):
     g_corr(x) = g(x) - g(0) and additionally mean-centered per feature.
     (x is the *standardized* input used for training.)
     """
-
     def __init__(self, d, hidden_dim=64, dropout=0.0, out_scale=0.3):
         super().__init__()
         self.beta = nn.Parameter(torch.zeros(d + 1))  # [b0, b1..bd]
         self.out_scale = out_scale  # Bound correction amplitude
-
+        
         # Bounded MLP with smaller initialization
         self.mlp = nn.Sequential(
             nn.Linear(d, hidden_dim), nn.Tanh(),
@@ -50,7 +49,7 @@ class NIMO(nn.Module):
             nn.Linear(hidden_dim, hidden_dim), nn.Tanh(),
             nn.Linear(hidden_dim, d)
         )
-
+        
         # Initialize final layer weights to be small
         with torch.no_grad():
             self.mlp[-1].weight.mul_(0.1)
@@ -83,10 +82,12 @@ class NIMO(nn.Module):
 
 
 @torch.no_grad()
-def update_beta_irls(model, X, y, lam_l2=1e-3, tau_l1=1e-3, use_correction=True, eps=1e-6, max_step=0.5):
-    """One IRLS step for beta; L2 on all, soft-threshold on coeffs (no intercept)."""
-    beta_prev = model.beta.detach().clone()
-
+def update_beta_irls_adaptive(model, X, y, w, lam_base=1e-1, tau_l1=2e-2, gamma=1.3,
+                              use_correction=True, eps=1e-6, max_step=0.5):
+    """
+    IRLS step for beta with adaptive ridge ≈ lasso.
+    w: per-coefficient weights (length d+1). We do NOT penalize intercept → set w[0]=0.
+    """
     B = model.design_matrix(X, use_correction=use_correction)  # [n, d+1]
     logits = B.matmul(model.beta)
     p = torch.sigmoid(logits)
@@ -94,39 +95,50 @@ def update_beta_irls(model, X, y, lam_l2=1e-3, tau_l1=1e-3, use_correction=True,
     z = logits + (y - p) / W
 
     BW = B * W.unsqueeze(1)
-    A = BW.t().matmul(B) + lam_l2 * torch.eye(B.shape[1], device=B.device, dtype=B.dtype)
-    bvec = BW.t().matmul(z)
-    beta_new = torch.linalg.solve(A, bvec)
+    # Adaptive ridge matrix: lam_base * diag(w)
+    A = BW.t().matmul(B) + lam_base * torch.diag(w)
+    b = BW.t().matmul(z)
+    beta_new = torch.linalg.solve(A, b)
 
+    # elementwise soft-threshold on features (skip intercept)
     beta_np = beta_new.detach().cpu().numpy()
     beta_np[1:] = np.sign(beta_np[1:]) * np.maximum(np.abs(beta_np[1:]) - tau_l1, 0.0)
 
-    # Trust region constraint
-    beta_tensor = torch.tensor(beta_np, device=B.device, dtype=B.dtype)
-    delta = beta_tensor - beta_prev
-    norm = torch.norm(delta)
-    if norm > max_step:
-        beta_tensor = beta_prev + delta * (max_step / (norm + 1e-12))
+    # trust region
+    beta_prev = model.beta.detach().clone()
+    beta_t = torch.tensor(beta_np, device=B.device, dtype=B.dtype)
+    delta = beta_t - beta_prev
+    nrm = torch.norm(delta)
+    if nrm > max_step:
+        beta_t = beta_prev + delta * (max_step / (nrm + 1e-12))
+    model.beta.data.copy_(beta_t)
 
-    model.beta.data.copy_(beta_tensor)
+    # update adaptive weights for next step (skip intercept)
+    beta_abs = model.beta.detach().abs()
+    w_new = w.clone()
+    w_new[0] = 0.0
+    w_new[1:] = 1.0 / (beta_abs[1:] + eps)**gamma
+    return w_new
 
 
-def run_nimo_variant(
-        X_train, y_train, X_test, y_test,
-        iteration, randomState, X_columns=None,
-        *,
-        X_val=None, y_val=None,
-        hidden_dim=64,
-        dropout=0.0,
-        T=20, nn_steps=1, lr=1e-3,
-        lam_l2=1e-1, tau_l1=5e-3,  # Stronger penalties
-        lam_g=2e-2,  # L1 on |g_corr| with curriculum
-        tau_beta_report=0.0,
-        eps_g=1e-3,
-        early_tol=1e-4,
-        out_scale=0.3,  # Bound correction amplitude
-        warm_start_steps=3,  # β warm-up steps
-        use_no_harm=True  # Enable no-harm switch
+def run_nimo(
+    X_train, y_train, X_test, y_test,
+    iteration, randomState, X_columns=None,
+    *,
+    X_val=None, y_val=None,
+    hidden_dim=64,
+    dropout=0.15,              # Increased dropout
+    T=25, nn_steps=2, lr=1e-3,
+    lam_l2=0.5, tau_l1=0.05,   # Much stronger penalties
+    lam_g=0.08,                # L1 on |g_corr| with curriculum
+    lam_group=0.02,            # Group-L2 penalty on NN inputs
+    tau_beta_report=0.01,      # Selection threshold
+    eps_g=1e-3,
+    early_tol=1e-4,
+    out_scale=0.2,             # Tighter correction amplitude
+    warm_start_steps=5,        # More warm-up steps
+    use_no_harm=True,          # Enable no-harm switch
+    gamma=1.3                  # Adaptive lasso gamma
 ):
     # ---- 0) Setup
     device = torch.device("cpu")
@@ -139,8 +151,8 @@ def run_nimo_variant(
     Xte = scaler.transform(X_test)
     Xva = scaler.transform(X_val) if X_val is not None else None
 
-    Xt = torch.tensor(Xtr, dtype=torch.float32, device=device)
-    yt = torch.tensor(y_train, dtype=torch.float32, device=device)
+    Xt   = torch.tensor(Xtr, dtype=torch.float32, device=device)
+    yt   = torch.tensor(y_train, dtype=torch.float32, device=device)
     XteT = torch.tensor(Xte, dtype=torch.float32, device=device)
     yteT = torch.tensor(y_test, dtype=torch.float32, device=device)
     if X_val is not None:
@@ -151,40 +163,60 @@ def run_nimo_variant(
     model = NIMO(d, hidden_dim=hidden_dim, dropout=dropout, out_scale=out_scale).to(device)
     opt = optim.Adam(model.mlp.parameters(), lr=lr, weight_decay=1e-4)  # Weight decay
 
+    # Initialize adaptive weights for β (d+1) — intercept weight 0
+    w = torch.ones(d+1, device=device) 
+    w[0] = 0.0
+
     # ---- 1.5) Warm start β with plain logistic (no correction)
     for _ in range(warm_start_steps):
-        update_beta_irls(model, Xt, yt, lam_l2=lam_l2, tau_l1=tau_l1, use_correction=False)
+        w = update_beta_irls_adaptive(model, Xt, yt, w, lam_base=lam_l2, tau_l1=tau_l1, 
+                                     gamma=gamma, use_correction=False)
 
     # ---- 2) Alternating training with curriculum learning
     loss_hist, prev_loss, stopped = [], float("inf"), False
     best_val_loss = float("inf")
     best_mlp_state = None
-
+    
     for t in range(T):
         model.eval()
-        update_beta_irls(model, Xt, yt, lam_l2=lam_l2, tau_l1=tau_l1, use_correction=True)
+        w = update_beta_irls_adaptive(model, Xt, yt, w, lam_base=lam_l2, tau_l1=tau_l1, 
+                                     gamma=gamma, use_correction=True)
+
+        # Anneal out_scale: 0.1 -> target_out_scale over T
+        init_scale, target_scale = 0.1, out_scale
+        alpha = t / max(1, T-1)
+        model.out_scale = init_scale + (target_scale - init_scale) * alpha
 
         # Curriculum learning for lam_g
         lam_g0, lam_g1 = lam_g, lam_g * 0.3  # final is 30% of start
-        lam_g_t = lam_g0 + (lam_g1 - lam_g0) * (t / max(1, T - 1))
+        lam_g_t = lam_g0 + (lam_g1 - lam_g0) * (t / max(1, T-1))
 
         for _ in range(nn_steps):
             model.train()
             opt.zero_grad()
             logits = model.predict_logits(Xt, use_correction=True)
             bce = F.binary_cross_entropy_with_logits(logits, yt)
-
+            
             with torch.no_grad():
                 g_corr = model.corrections(Xt)
-
+            
+            # Add small noise to corrections during training
+            if model.training:
+                g_corr = g_corr + 0.01 * torch.randn_like(g_corr)
+            
             # Orthogonality penalty: discourage g from aligning with x
             align = torch.mean(torch.abs((Xt * g_corr).mean(dim=0)))
-
+            
+            # Group-L2 penalty on NN first layer inputs (per input feature)
+            W1 = model.mlp[0].weight  # shape: [hidden_dim, d]
+            group_l2 = torch.sqrt((W1**2).sum(dim=0) + 1e-12).mean()  # average group norm
+            reg_group = lam_group * group_l2
+            
             reg_g = lam_g_t * g_corr.abs().mean()
-            loss = bce + reg_g + 1e-3 * align
-
+            loss = bce + reg_g + reg_group + 1e-3 * align
+            
             loss.backward()
-
+            
             # Gradient clipping
             torch.nn.utils.clip_grad_norm_(model.mlp.parameters(), max_norm=1.0)
             opt.step()
@@ -212,18 +244,18 @@ def run_nimo_variant(
     model.eval()
     use_corr_final = True
     no_harm_choice = "on"
-
+    
     if use_no_harm and X_val is not None:
         with torch.no_grad():
-            prob_val_on = model.predict_proba(XvaT, use_correction=True).cpu().numpy()
+            prob_val_on  = model.predict_proba(XvaT, use_correction=True).cpu().numpy()
             prob_val_off = model.predict_proba(XvaT, use_correction=False).cpu().numpy()
-
+        
         grid = np.linspace(0.0, 1.0, 501)
-        f1_on = max(f1_score(y_val, (prob_val_on >= t).astype(int), zero_division=0) for t in grid)
+        f1_on  = max(f1_score(y_val, (prob_val_on  >= t).astype(int), zero_division=0) for t in grid)
         f1_off = max(f1_score(y_val, (prob_val_off >= t).astype(int), zero_division=0) for t in grid)
         use_corr_final = (f1_on >= f1_off)
         no_harm_choice = "on" if use_corr_final else "off"
-
+    
     # Compute test probabilities with chosen correction mode
     with torch.no_grad():
         prob_te = model.predict_proba(XteT, use_correction=use_corr_final).cpu().numpy()
@@ -244,18 +276,17 @@ def run_nimo_variant(
     def decomposition(X_np):
         X_t = torch.tensor(X_np, dtype=torch.float32, device=device)
         with torch.no_grad():
-            eta_lin = model.predict_logits(X_t, use_correction=False).cpu().numpy()
+            eta_lin  = model.predict_logits(X_t, use_correction=False).cpu().numpy()
             eta_full = model.predict_logits(X_t, use_correction=use_corr_final).cpu().numpy()
         eta_corr = eta_full - eta_lin
         var_full = np.var(eta_full)
         return dict(
             corr_mean_abs=float(np.mean(np.abs(eta_corr))),
-            corr_var_share=float(np.var(eta_corr) / var_full) if var_full > 1e-12 else 0.0,
-            lin_full_corr=float(np.corrcoef(eta_lin, eta_full)[0, 1]) if np.std(eta_lin) > 0 and np.std(
-                eta_full) > 0 else 0.0
+            corr_var_share=float(np.var(eta_corr)/var_full) if var_full > 1e-12 else 0.0,
+            lin_full_corr=float(np.corrcoef(eta_lin, eta_full)[0,1]) if np.std(eta_lin)>0 and np.std(eta_full)>0 else 0.0
         )
 
-    decomp_val = decomposition(Xva) if X_val is not None else None
+    decomp_val  = decomposition(Xva) if X_val is not None else None
     decomp_test = decomposition(Xte)
 
     # ---- 5) Correction stats (val)
@@ -271,14 +302,14 @@ def run_nimo_variant(
         }
 
     # ---- 6) Map β back to RAW space and build selection from raw β
-    beta_std = model.beta.detach().cpu().numpy()[1:]  # coeffs for standardized inputs
-    b0_std = float(model.beta.detach().cpu().numpy()[0])
+    beta_std = model.beta.detach().cpu().numpy()[1:]     # coeffs for standardized inputs
+    b0_std   = float(model.beta.detach().cpu().numpy()[0])
 
-    s = scaler.scale_
+    s  = scaler.scale_
     mu = scaler.mean_
 
     beta_raw = beta_std / s
-    b0_raw = b0_std - float(np.dot(beta_raw, mu))
+    b0_raw   = b0_std - float(np.dot(beta_raw, mu))
 
     beta_for_sel = beta_raw.copy()
     if tau_beta_report > 0:
@@ -307,8 +338,8 @@ def run_nimo_variant(
 
         "coefficients": {
             "intercept": float(b0_raw),
-            "values": beta_raw.tolist(),  # RAW-space linear β
-            "values_effective": beta_eff_raw.tolist(),  # includes avg modulation (near-equal due to centering)
+            "values": beta_raw.tolist(),                 # RAW-space linear β
+            "values_effective": beta_eff_raw.tolist(),   # includes avg modulation (near-equal due to centering)
             "feature_names": feature_names,
             "coef_threshold_applied": float(tau_beta_report),
             "scale": s.tolist(), "mean": mu.tolist()
@@ -322,8 +353,7 @@ def run_nimo_variant(
         "no_harm_val": (
             None if (X_val is None) else
             {
-                "g_frobenius_per_dim": float(
-                    np.linalg.norm(g_corr_val) / max(1, beta_raw.size)) if 'g_corr_val' in locals() else None,
+                "g_frobenius_per_dim": float(np.linalg.norm(g_corr_val) / max(1, beta_raw.size)) if 'g_corr_val' in locals() else None,
                 "lin_full_corr": (decomp_val["lin_full_corr"] if decomp_val else None),
                 "no_harm_choice": no_harm_choice,
                 "f1_on": f1_on if use_no_harm and X_val is not None else None,
@@ -345,11 +375,13 @@ def run_nimo_variant(
             "lam_l2": float(lam_l2),
             "tau_l1": float(tau_l1),
             "lam_g": float(lam_g),
+            "lam_group": float(lam_group),
             "tau_beta_report": float(tau_beta_report),
             "eps_g": float(eps_g),
             "out_scale": float(out_scale),
             "warm_start_steps": int(warm_start_steps),
             "use_no_harm": bool(use_no_harm),
+            "gamma": float(gamma),
         },
     }
     return standardize_method_output(result)

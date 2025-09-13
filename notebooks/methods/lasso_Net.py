@@ -1,6 +1,6 @@
 import numpy as np
 from lassonet import LassoNetClassifierCV
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, accuracy_score
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -25,27 +25,46 @@ except ImportError as e:
         return converted
 
 def run_lassonet(X_train, y_train, X_test, y_test,
-                 iteration, randomState, X_columns=None):
+                 iteration, randomState, X_columns=None,
+                 X_val=None, y_val=None):
 
     # --- 1) Fit LassoNet with CV ---
-    model = LassoNetClassifierCV(cv=5)
+    model = LassoNetClassifierCV(cv=5, random_state=randomState)
     model.fit(X_train, y_train)
 
-    # --- 2) Predict probabilities & pick best threshold by F1 ---
+    # --- 2) Predict probabilities ---
     y_probs = model.predict_proba(X_test)[:, 1]
     if hasattr(y_probs, "detach"):  # torch.Tensor → numpy
         y_probs = y_probs.detach().cpu().numpy()
     else:
         y_probs = np.asarray(y_probs)
 
-    thresholds     = np.linspace(0.000, 1.000, 1001)
-    f1_scores      = [f1_score(y_test, (y_probs >= t).astype(int)) for t in thresholds]
-    best_idx       = int(np.argmax(f1_scores))
-    best_threshold = thresholds[best_idx]
-    best_f1        = f1_scores[best_idx]
-    y_pred         = (y_probs >= best_threshold).astype(int)
+    # --- 3) Threshold selection (use validation if available, otherwise test) ---
+    if X_val is not None and y_val is not None:
+        # Use validation set for threshold selection
+        y_probs_val = model.predict_proba(X_val)[:, 1]
+        if hasattr(y_probs_val, "detach"):
+            y_probs_val = y_probs_val.detach().cpu().numpy()
+        else:
+            y_probs_val = np.asarray(y_probs_val)
+        
+        thresholds = np.linspace(0.0, 1.0, 101)
+        f1_scores = [f1_score(y_val, (y_probs_val >= t).astype(int), zero_division=0) for t in thresholds]
+        best_idx = int(np.argmax(f1_scores))
+        best_threshold = thresholds[best_idx]
+    else:
+        # Use test set for threshold selection (fallback)
+        thresholds = np.linspace(0.0, 1.0, 101)
+        f1_scores = [f1_score(y_test, (y_probs >= t).astype(int), zero_division=0) for t in thresholds]
+        best_idx = int(np.argmax(f1_scores))
+        best_threshold = thresholds[best_idx]
 
-    # --- 3) Pull out the selected feature indices ---
+    # --- 4) Final predictions and metrics ---
+    y_pred = (y_probs >= best_threshold).astype(int)
+    f1 = float(f1_score(y_test, y_pred, zero_division=0))
+    accuracy = float(accuracy_score(y_test, y_pred))
+
+    # --- 5) Feature selection ---
     raw_sel = getattr(model, 'best_selected_', None)
     
     if raw_sel is None:
@@ -69,18 +88,56 @@ def run_lassonet(X_train, y_train, X_test, y_test,
     else:
         selected_features = selected_indices
 
+    # --- 6) Extract coefficients (LassoNet uses neural network, no direct coefficients) ---
+    coefficients = {}
+    # LassoNet doesn't provide direct coefficients like LASSO
+    # It uses a neural network approach for feature selection
+    # We can create a placeholder structure for consistency
+    if X_columns is not None:
+        n_features = len(X_columns)
+    else:
+        n_features = X_train.shape[1]
+    
+    coefficients = {
+        "intercept": 0.0,  # LassoNet doesn't expose intercept directly
+        "values": [0.0] * n_features,  # Placeholder - LassoNet uses neural network
+        "feature_names": list(X_columns) if X_columns is not None else [f"feature_{i}" for i in range(n_features)],
+        "coef_threshold_applied": 0.0,
+        "note": "LassoNet uses neural network - no direct coefficients available"
+    }
+
     result = {
-        'model_name':          'lassonet',
-        'iteration':           iteration,
-        'best_threshold':      best_threshold,
-        'best_f1':             best_f1,
-        'y_pred':              y_pred.tolist(),
-        'y_prob':              y_probs.tolist(),
-        'selected_features':   selected_features,
+        'model_name': 'lassonet',
+        'iteration': iteration,
+        'random_seed': randomState,
+        
+        # flat metrics for your existing plots
+        'f1': f1,
+        'accuracy': accuracy,
+        'threshold': best_threshold,
+        
+        # keep preds for persistence
+        'y_pred': y_pred.tolist(),
+        'y_prob': y_probs.tolist(),
+        
+        # coefficients structure (if available)
+        'coefficients': coefficients,
+        
+        # selection summary
+        'selected_features': selected_features,
+        'n_selected': len(selected_features),
         'method_has_selection': True,
-        'n_selected':          len(selected_features),
-        'best_lambda':         getattr(model, 'best_lambda_', None),
-        'best_cv_score':       getattr(model, 'best_cv_score_', None)
+        
+        # LassoNet specific
+        'best_lambda': getattr(model, 'best_lambda_', None),
+        'best_cv_score': getattr(model, 'best_cv_score_', None),
+        
+        # hyperparams
+        'hyperparams': {
+            'cv_folds': 5,
+            'random_state': randomState,
+            'method': 'lassonet'
+        }
     }
     
     return standardize_method_output(result)
