@@ -302,7 +302,25 @@ def run_nimo(
             "rel_mod": np.mean(np.abs(Xva * g_val), axis=0).tolist(),
         }
 
-    # ---- 6) Report standardized coefficients (no conversion to RAW)
+    # ---- 6) Extract neural network weights and biases for analysis
+    with torch.no_grad():
+        # Extract weights and biases from all layers
+        nn_weights = []
+        nn_biases = []
+        
+        for layer in model.mlp:
+            if isinstance(layer, nn.Linear):
+                nn_weights.append(layer.weight.detach().cpu().numpy().tolist())
+                if layer.bias is not None:
+                    nn_biases.append(layer.bias.detach().cpu().numpy().tolist())
+                else:
+                    nn_biases.append([0.0] * layer.out_features)  # No bias case
+        
+        # Also extract the first layer weights specifically for sparsity analysis
+        first_layer_weights = model.mlp[0].weight.detach().cpu().numpy()  # [hidden_dim, input_dim]
+        first_layer_biases = model.mlp[0].bias.detach().cpu().numpy() if model.mlp[0].bias is not None else np.zeros(model.mlp[0].out_features)
+
+    # ---- 7) Report standardized coefficients (no conversion to RAW)
     beta_std_all = model.beta.detach().cpu().numpy()   # [b0, b1..bd] for standardized X
     intercept_std = float(beta_std_all[0])
     beta_std = beta_std_all[1:].copy()
@@ -317,7 +335,7 @@ def run_nimo(
         else [j for j, m in enumerate(selected_mask) if m]
     )
 
-    # ---- 7) Results
+    # ---- 8) Results
     feature_names = list(X_columns) if X_columns else [f"feature_{i}" for i in range(len(beta_std))]
     result = {
         "model_name": "nimo",
@@ -338,6 +356,11 @@ def run_nimo(
             "coef_threshold_applied": float(tau_beta_report),
             "mean": scaler.mean_.tolist(),
             "scale": scaler.scale_.tolist(),
+            # Add neural network weights and biases for analysis
+            "nn_weights": nn_weights,
+            "nn_biases": nn_biases,
+            "first_layer_weights": first_layer_weights.tolist(),
+            "first_layer_biases": first_layer_biases.tolist(),
         }),
         "selection": {"mask": selected_mask, "features": selected_features},
         "n_selected": len(selected_features),

@@ -1,0 +1,38 @@
+{
+  "dataset": "bank_marketing",
+  "description": "Bank Marketing Dataset (UCI)",
+  "n_samples": 11161,
+  "n_features": 50,
+  "class_dist_full": [
+    5873,
+    5288
+  ],
+  "test_size": 5580,
+  "pool_size": 5581,
+  "drop_cols": [
+    "duration"
+  ],
+  "target": "y",
+  "positive_label": "yes",
+  "categorical": [
+    "job",
+    "marital",
+    "education",
+    "default",
+    "housing",
+    "loan",
+    "contact",
+    "month",
+    "poutcome"
+  ],
+  "numeric": [
+    "age",
+    "balance",
+    "day",
+    "campaign",
+    "pdays",
+    "previous"
+  ],
+  "separator": ";",
+  "note": "Transformer fitted on POOL only; no scaling here."
+}

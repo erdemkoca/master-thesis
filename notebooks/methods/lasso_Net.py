@@ -77,18 +77,24 @@ def run_lassonet(X_train, y_train, X_test, y_test,
     
     if raw_sel is None:
         selected_indices = []
+        n_selected = 0
     else:
-        # Convert to numpy array for easier handling
-        arr = np.asarray(raw_sel)
+        # Convert PyTorch tensor to numpy if needed
+        if hasattr(raw_sel, 'detach'):
+            raw_sel = raw_sel.detach().cpu().numpy()
+        else:
+            raw_sel = np.asarray(raw_sel)
         
-        # Check if it's a boolean/0-1 mask
-        if arr.ndim == 1 and set(np.unique(arr)) <= {0, 1}:
-            # It's a mask, convert to indices
-            mask = np.asarray(raw_sel, dtype=bool)
+        # LassoNet returns boolean mask - convert to indices
+        if raw_sel.dtype == bool or set(np.unique(raw_sel)) <= {0, 1, True, False}:
+            # It's a boolean mask, convert to indices
+            mask = raw_sel.astype(bool)
             selected_indices = list(np.nonzero(mask)[0])
         else:
             # It's already an index list/array
             selected_indices = list(raw_sel)
+        
+        n_selected = len(selected_indices)
     
     # Map to column names only after we have a real integer list
     if X_columns is not None:
@@ -96,25 +102,15 @@ def run_lassonet(X_train, y_train, X_test, y_test,
     else:
         selected_features = selected_indices
 
-    # --- 7) Extract coefficients (LassoNet uses neural network, no direct coefficients) ---
-    # LassoNet doesn't provide direct coefficients like LASSO
-    # It uses a neural network approach for feature selection
-    # We can create a placeholder structure for consistency
-    if X_columns is not None:
-        n_features = len(X_columns)
-    else:
-        n_features = X_train.shape[1]
-    
+    # --- 7) Simplified coefficient structure (LassoNet uses neural network) ---
+    # LassoNet doesn't provide traditional linear coefficients
+    # We only track feature selection information
     coefficients = {
         "space": "standardized",
-        "intercept": 0.0,  # LassoNet doesn't expose intercept directly
-        "values": [0.0] * n_features,  # Placeholder - LassoNet uses neural network
-        "values_no_threshold": [0.0] * n_features,  # Same as values for LassoNet
-        "feature_names": list(X_columns) if X_columns is not None else [f"feature_{i}" for i in range(n_features)],
-        "coef_threshold_applied": 0.0,
-        "mean": scaler.mean_.tolist(),
-        "scale": scaler.scale_.tolist(),
-        "note": "LassoNet uses neural network - no direct coefficients available"
+        "selected_features": selected_features,
+        "n_selected": n_selected,
+        "feature_names": list(X_columns) if X_columns is not None else [f"feature_{i}" for i in range(X_train.shape[1])],
+        "note": "LassoNet uses neural network - only feature selection available"
     }
 
     result = {
@@ -136,7 +132,7 @@ def run_lassonet(X_train, y_train, X_test, y_test,
         
         # selection summary
         'selected_features': selected_features,
-        'n_selected': len(selected_features),
+        'n_selected': n_selected,
         'method_has_selection': True,
         
         # LassoNet specific

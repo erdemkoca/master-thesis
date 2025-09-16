@@ -80,10 +80,6 @@ def rebalance_train_indices(y, idx_tr, mode="oversample", target_pos=0.5, seed=0
     idx_pos = idx_tr[y_tr == 1]
     idx_neg = idx_tr[y_tr == 0]
     
-    # Calculate target counts
-    n_target_pos = int(round(target_pos * len(idx_tr)))
-    n_target_neg = len(idx_tr) - n_target_pos
-    
     def draw(k, arr, replace):
         """Draw k samples with or without replacement."""
         if len(arr) == 0:
@@ -91,11 +87,26 @@ def rebalance_train_indices(y, idx_tr, mode="oversample", target_pos=0.5, seed=0
         return rng.choice(arr, size=k, replace=replace)
     
     if mode == "oversample":
-        # Oversample minority class
+        # Oversample minority class - target counts based on total training set
+        n_target_pos = int(round(target_pos * len(idx_tr)))
+        n_target_neg = len(idx_tr) - n_target_pos
         new_pos = draw(n_target_pos, idx_pos, replace=True)
         new_neg = draw(n_target_neg, idx_neg, replace=True)
     elif mode == "undersample":
-        # Undersample majority class
+        # Undersample majority class - target counts based on available samples
+        n_available_pos = len(idx_pos)
+        n_available_neg = len(idx_neg)
+        
+        # Calculate how many samples we can take while maintaining target_pos
+        # If we take all positive samples, how many negative samples do we need?
+        n_target_pos = n_available_pos
+        n_target_neg = int(round(n_available_pos * (1 - target_pos) / target_pos))
+        
+        # If we don't have enough negative samples, take all and adjust positive
+        if n_target_neg > n_available_neg:
+            n_target_neg = n_available_neg
+            n_target_pos = int(round(n_available_neg * target_pos / (1 - target_pos)))
+        
         new_pos = draw(n_target_pos, idx_pos, replace=False)
         new_neg = draw(n_target_neg, idx_neg, replace=False)
     else:

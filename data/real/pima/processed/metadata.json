@@ -1,0 +1,28 @@
+{
+  "dataset": "pima",
+  "description": "Pima Indians Diabetes Dataset (UCI)",
+  "n_samples": 768,
+  "n_features": 8,
+  "class_dist_full": [
+    500,
+    268
+  ],
+  "test_size": 384,
+  "pool_size": 384,
+  "drop_cols": [],
+  "target": "Outcome",
+  "positive_label": 1,
+  "categorical": [],
+  "numeric": [
+    "Pregnancies",
+    "Glucose",
+    "BloodPressure",
+    "SkinThickness",
+    "Insulin",
+    "BMI",
+    "DiabetesPedigreeFunction",
+    "Age"
+  ],
+  "separator": ",",
+  "note": "Transformer fitted on POOL only; no scaling here."
+}

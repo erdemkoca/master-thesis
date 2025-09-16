@@ -45,13 +45,25 @@ def run_random_forest(X_train, y_train, X_test, y_test, iteration, randomState, 
     y_probs = best_model.predict_proba(X_test)[:, 1]
     importances = best_model.feature_importances_
 
-    # Fine-grained threshold optimization (0.001 step)
-    thresholds = np.linspace(0.000, 1.000, 1001)
-    f1_scores = [f1_score(y_test, (y_probs >= t).astype(int), zero_division=0) for t in thresholds]
-    best_idx = int(np.argmax(f1_scores))
-    best_threshold = thresholds[best_idx]
-    best_f1 = f1_scores[best_idx]
-    y_pred = (y_probs >= best_threshold).astype(int)
+    # Threshold optimization using validation set if available, otherwise test set
+    if X_val is not None and y_val is not None:
+        # Use validation set for threshold optimization (CORRECT approach)
+        y_probs_val = best_model.predict_proba(X_val)[:, 1]
+        thresholds = np.linspace(0.000, 1.000, 1001)
+        f1_scores = [f1_score(y_val, (y_probs_val >= t).astype(int), zero_division=0) for t in thresholds]
+        best_idx = int(np.argmax(f1_scores))
+        best_threshold = thresholds[best_idx]
+        # Apply chosen threshold to test set
+        y_pred = (y_probs >= best_threshold).astype(int)
+        best_f1 = f1_score(y_test, y_pred, zero_division=0)
+    else:
+        # Fallback to test set (not ideal but better than nothing)
+        thresholds = np.linspace(0.000, 1.000, 1001)
+        f1_scores = [f1_score(y_test, (y_probs >= t).astype(int), zero_division=0) for t in thresholds]
+        best_idx = int(np.argmax(f1_scores))
+        best_threshold = thresholds[best_idx]
+        best_f1 = f1_scores[best_idx]
+        y_pred = (y_probs >= best_threshold).astype(int)
 
     # Feature Importances - use threshold-based selection
     importances = best_model.feature_importances_
@@ -59,18 +71,24 @@ def run_random_forest(X_train, y_train, X_test, y_test, iteration, randomState, 
     selected_features = [X_columns[i] for i, imp in enumerate(importances) if imp > importance_threshold] \
         if X_columns is not None else []
 
+    # Calculate accuracy
+    from sklearn.metrics import accuracy_score
+    accuracy = accuracy_score(y_test, y_pred)
+    
     result = {
-        'model_name': 'RandomForest',
+        'model_name': 'random_forest',
         'iteration': iteration,
-        'best_params': grid.best_params_,
-        'best_threshold': best_threshold,
-        'best_f1': best_f1,
+        'random_seed': randomState,
+        'f1': best_f1,
+        'accuracy': accuracy,
+        'threshold': best_threshold,
         'y_pred': y_pred.tolist(),
         'y_prob': y_probs.tolist(),
         'feature_importances': importances.tolist(),
         'selected_features': selected_features,
         'method_has_selection': False,
-        'n_selected': len(selected_features)
+        'n_selected': len(selected_features),
+        'hyperparams': grid.best_params_
     }
 
     return standardize_method_output(result)

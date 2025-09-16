@@ -1,0 +1,36 @@
+{
+  "dataset": "adult_income",
+  "description": "Adult Income Dataset (UCI)",
+  "n_samples": 32561,
+  "n_features": 104,
+  "class_dist_full": [
+    24720,
+    7841
+  ],
+  "test_size": 16280,
+  "pool_size": 16281,
+  "drop_cols": [
+    "fnlwgt"
+  ],
+  "target": "income",
+  "positive_label": ">50K",
+  "categorical": [
+    "workclass",
+    "education",
+    "marital.status",
+    "occupation",
+    "relationship",
+    "race",
+    "sex",
+    "native.country"
+  ],
+  "numeric": [
+    "age",
+    "education.num",
+    "capital.gain",
+    "capital.loss",
+    "hours.per.week"
+  ],
+  "separator": ",",
+  "note": "Transformer fitted on POOL only; no scaling here."
+}

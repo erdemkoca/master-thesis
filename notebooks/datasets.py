@@ -15,8 +15,7 @@ DATASETS = [
     {"kind": "real", "id": "breast_cancer", "path": "../data/real/breast_cancer/processed", "n_train": 140, "n_val": 60, "desc": "Breast Cancer Wisconsin"},
     {"kind": "real", "id": "pima", "path": "../data/real/pima/processed", "n_train": 140, "n_val": 60, "desc": "Pima Indians Diabetes"},
     {"kind": "real", "id": "bank_marketing", "path": "../data/real/bank_marketing/processed", "n_train": 140, "n_val": 60, "desc": "Bank Marketing"},
-    {"kind": "real", "id": "credit_default", "path": "../data/real/credit_default/processed", "n_train": 140, "n_val": 60, "desc": "Credit Card Default"},
-    {"kind": "real", "id": "spambase", "path": "../data/real/spambase/processed", "n_train": 140, "n_val": 60, "desc": "Spambase"},
+    {"kind": "real", "id": "adult_income", "path": "../data/real/adult_income/processed", "n_train": 140, "n_val": 60, "desc": "Adult Income"},
 ]
 
 def get_dataset_by_id(dataset_id):

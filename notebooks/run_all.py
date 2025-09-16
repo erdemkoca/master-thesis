@@ -20,6 +20,8 @@ from sampling import stratified_with_replacement, rebalance_train_indices, get_c
 from methods.lasso import run_lasso
 from methods.lasso_Net import run_lassonet
 from methods.nimo_variants.nimo import run_nimo
+from methods.random_forest import run_random_forest
+from methods.neural_net import run_neural_net
 
 def run_all_methods(X_tr, y_tr, X_va, y_va, X_te, y_te, seed, feature_names, dataset_info=None):
     """
@@ -38,8 +40,10 @@ def run_all_methods(X_tr, y_tr, X_va, y_va, X_te, y_te, seed, feature_names, dat
     """
     methods = [
         ("lasso", run_lasso),
-        #("lassonet", run_lassonet),
-        ("nimo", run_nimo)
+        ("lassonet", run_lassonet),
+        ("nimo", run_nimo),
+        ("random_forest", run_random_forest),
+        ("neural_net", run_neural_net)
     ]
     
     results = []
@@ -96,7 +100,7 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/all"):
     """
     # Default rebalancing config
     if rebalance_config is None:
-        rebalance_config = {"mode": "oversample", "target_pos": 0.5}
+        rebalance_config = {"mode": "undersample", "target_pos": 0.5}
     
     print("="*80)
     print("UNIFIED EXPERIMENT RUNNER")
@@ -147,8 +151,7 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/all"):
                 'breast_cancer': 'Breast Cancer Wisconsin (569 samples, 30 features)',
                 'pima': 'Pima Indians Diabetes (768 samples, 8 features)',
                 'bank_marketing': 'Bank Marketing (11,161 samples, 50 features)',
-                'credit_default': 'Credit Card Default (30,000 samples, 90 features)',
-                'spambase': 'Spambase (4,601 samples, 57 features)'
+                'adult_income': 'Adult Income (32,561 samples, 14 features)'
             }
             
             # Add scenario-like fields for unified plotting
@@ -286,4 +289,4 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/all"):
 
 if __name__ == "__main__":
     # Run with default settings
-    df = main(n_iterations=10)  # Start with 5 iterations for testing
+    df = main(n_iterations=20)  # Start with 3 iterations for testing

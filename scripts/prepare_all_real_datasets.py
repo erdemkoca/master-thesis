@@ -45,8 +45,7 @@ def main():
         "prepare_breast_cancer.py",  # Downloads from sklearn
         "prepare_pima.py",           # Requires manual download
         "prepare_bank_marketing.py", # Requires manual download
-        "prepare_credit_default.py", # Requires manual download
-        "prepare_spambase.py"        # Requires manual download
+        "prepare_adult_income.py"    # Requires manual download
     ]
     
     # Check which datasets are available
