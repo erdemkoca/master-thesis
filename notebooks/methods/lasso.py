@@ -57,6 +57,12 @@ def run_lasso(
     y_pred = (p_te >= best_thr).astype(int)
     f1 = float(f1_score(y_test, y_pred, zero_division=0))
     acc = float(accuracy_score(y_test, y_pred))
+    
+    # Training performance for overfitting analysis
+    p_tr = clf.predict_proba(X_tr)[:, 1]
+    y_train_pred = (p_tr >= best_thr).astype(int)
+    train_f1 = float(f1_score(y_train, y_train_pred, zero_division=0))
+    train_acc = float(accuracy_score(y_train, y_train_pred))
 
     # ---------------------------
     # 5) Coefficients: report standardized coefficients
@@ -82,6 +88,8 @@ def run_lasso(
         # flat metrics for your existing plots
         "f1": f1,
         "accuracy": acc,
+        "train_f1": train_f1,
+        "train_accuracy": train_acc,
         "threshold": best_thr,
 
         # keep preds for persistence

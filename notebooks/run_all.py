@@ -10,6 +10,7 @@ import os
 import json
 import time
 from datetime import datetime
+from pathlib import Path
 
 # Import our modules
 from datasets import DATASETS
@@ -22,6 +23,83 @@ from methods.lasso_Net import run_lassonet
 from methods.nimo_variants.nimo import run_nimo
 from methods.random_forest import run_random_forest
 from methods.neural_net import run_neural_net
+from methods.sparse_neural_net import run_sparse_neural_net
+from methods.sparse_linear_baseline import run_sparse_linear_baseline
+
+def discover_synthetic_scenarios(synthetic_data_path="../data/synthetic"):
+    """
+    Dynamically discover all available synthetic scenarios by scanning the data directory.
+    
+    Args:
+        synthetic_data_path: Path to synthetic data directory
+        
+    Returns:
+        list: List of discovered synthetic dataset configurations
+    """
+    synthetic_scenarios = []
+    data_path = Path(synthetic_data_path)
+    
+    if not data_path.exists():
+        print(f"Warning: Synthetic data path {data_path} does not exist")
+        return []
+    
+    # Look for scenario_* directories or files
+    pattern_files = list(data_path.glob("scenario_*_X_full.npy"))
+    
+    for pattern_file in pattern_files:
+        # Extract scenario ID from filename (e.g., "scenario_A_X_full.npy" -> "A")
+        scenario_id = pattern_file.stem.split("_")[1]  # scenario_A_X_full -> A
+        
+        # Check if all required files exist for this scenario
+        required_files = [
+            f"scenario_{scenario_id}_X_full.npy",
+            f"scenario_{scenario_id}_y_full.npy", 
+            f"scenario_{scenario_id}_idx_pool.npy",
+            f"scenario_{scenario_id}_idx_test_big.npy",
+            f"scenario_{scenario_id}_metadata.json"
+        ]
+        
+        all_files_exist = all((data_path / f).exists() for f in required_files)
+        
+        if all_files_exist:
+            # Create dataset configuration
+            scenario_config = {
+                "kind": "synthetic",
+                "id": scenario_id,
+                "path": str(data_path),
+                "n_train": 1400,  # Default values
+                "n_val": 600,
+                "desc": f"Synthetic scenario {scenario_id} (auto-discovered)"
+            }
+            synthetic_scenarios.append(scenario_config)
+            print(f"  ✓ Discovered synthetic scenario: {scenario_id}")
+        else:
+            print(f"  ✗ Incomplete scenario {scenario_id}: missing required files")
+    
+    # Sort by scenario ID for consistent ordering
+    synthetic_scenarios.sort(key=lambda x: x["id"])
+    
+    print(f"Discovered {len(synthetic_scenarios)} synthetic scenarios: {[s['id'] for s in synthetic_scenarios]}")
+    return synthetic_scenarios
+
+def get_all_datasets():
+    """
+    Get all datasets including dynamically discovered synthetic scenarios.
+    
+    Returns:
+        list: Combined list of real datasets and discovered synthetic scenarios
+    """
+    # Get real datasets from registry
+    real_datasets = [d for d in DATASETS if d["kind"] == "real"]
+    
+    # Discover synthetic scenarios dynamically
+    synthetic_datasets = discover_synthetic_scenarios()
+    
+    # Combine real and synthetic datasets
+    all_datasets = synthetic_datasets + real_datasets
+    
+    print(f"Total datasets: {len(all_datasets)} ({len(synthetic_datasets)} synthetic, {len(real_datasets)} real)")
+    return all_datasets
 
 def run_all_methods(X_tr, y_tr, X_va, y_va, X_te, y_te, seed, feature_names, dataset_info=None):
     """
@@ -40,10 +118,12 @@ def run_all_methods(X_tr, y_tr, X_va, y_va, X_te, y_te, seed, feature_names, dat
     """
     methods = [
         ("lasso", run_lasso),
-        ("lassonet", run_lassonet),
+        #("lassonet", run_lassonet),
         ("nimo", run_nimo),
         ("random_forest", run_random_forest),
-        ("neural_net", run_neural_net)
+        #("neural_net", run_neural_net),
+        #("sparse_neural_net", run_sparse_neural_net),
+        #("sparse_linear_baseline", run_sparse_linear_baseline)
     ]
     
     results = []
@@ -102,10 +182,13 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/all"):
     if rebalance_config is None:
         rebalance_config = {"mode": "undersample", "target_pos": 0.5}
     
+    # Get all datasets (including dynamically discovered synthetic scenarios)
+    all_datasets = get_all_datasets()
+    
     print("="*80)
     print("UNIFIED EXPERIMENT RUNNER")
     print("="*80)
-    print(f"Datasets: {len(DATASETS)}")
+    print(f"Datasets: {len(all_datasets)}")
     print(f"Iterations per dataset: {n_iterations}")
     print(f"Rebalancing: {rebalance_config}")
     print(f"Output directory: {output_dir}")
@@ -117,7 +200,7 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/all"):
     all_results = []
     start_time = time.time()
     
-    for dataset_idx, entry in enumerate(DATASETS):
+    for dataset_idx, entry in enumerate(all_datasets):
         print(f"\n{'='*20} DATASET {entry['id']} ({entry['kind']}) {'='*20}")
         print(f"Description: {entry.get('desc', 'No description')}")
         
@@ -148,6 +231,7 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/all"):
                 'B': 'Linear (high-dim, 200 features)', 
                 'C': 'Linear + univariate nonlinearity (low-dim, 20 features)',
                 'D': 'Linear + interactions + nonlinearity (high-dim, 200 features)',
+                'E': 'Purely nonlinear (medium-dim, 50 features)',
                 'breast_cancer': 'Breast Cancer Wisconsin (569 samples, 30 features)',
                 'pima': 'Pima Indians Diabetes (768 samples, 8 features)',
                 'bank_marketing': 'Bank Marketing (11,161 samples, 50 features)',
@@ -239,9 +323,9 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/all"):
         "timestamp": datetime.now().isoformat(),
         "n_iterations": n_iterations,
         "rebalance_config": rebalance_config,
-        "n_datasets": len(DATASETS),
+        "n_datasets": len(all_datasets),
         "n_results": len(all_results),
-        "datasets": DATASETS,
+        "datasets": all_datasets,
         "total_time": time.time() - start_time
     }
     
@@ -253,7 +337,7 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/all"):
     print("EXPERIMENT SUMMARY")
     print("="*80)
     print(f"Total results: {len(all_results)}")
-    print(f"Datasets processed: {len(DATASETS)}")
+    print(f"Datasets processed: {len(all_datasets)}")
     print(f"Iterations per dataset: {n_iterations}")
     print(f"Total time: {time.time() - start_time:.1f} seconds")
     print(f"Results saved to: {output_file}")
@@ -289,4 +373,4 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/all"):
 
 if __name__ == "__main__":
     # Run with default settings
-    df = main(n_iterations=20)  # Start with 3 iterations for testing
+    df = main(n_iterations=8)  # Start with 3 iterations for testing

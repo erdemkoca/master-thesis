@@ -40,12 +40,12 @@ class NIMO(nn.Module):
     """
     def __init__(self, d, hidden_dim=64, dropout=0.0, out_scale=0.3):
         super().__init__()
-        self.beta = nn.Parameter(torch.zeros(d + 1))  # [b0, b1..bd]
+        self.beta = nn.Parameter(torch.zeros(d + 1))  # [b0, b1..bd] Parameters, Linear coefficients
         self.out_scale = out_scale  # Bound correction amplitude
         
-        # Bounded MLP with smaller initialization
+        # small 2 layer mlp, hidden dim 64, non-linearities= tanh
         self.mlp = nn.Sequential(
-            nn.Linear(d, hidden_dim), nn.Tanh(),
+            nn.Linear(d, hidden_dim), nn.Tanh(), #[-1,1]
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim), nn.Tanh(),
             nn.Linear(hidden_dim, d)
@@ -71,7 +71,7 @@ class NIMO(nn.Module):
     def design_matrix(self, x, use_correction=True):
         n, d = x.shape
         ones = torch.ones(n, 1, device=x.device, dtype=x.dtype)
-        feats = x if not use_correction else x * (1.0 + self.corrections(x))
+        feats = x if not use_correction else x * (1.0 + self.corrections(x)) # each x_j is scale with (1+g_j(x))
         return torch.cat([ones, feats], dim=1)
 
     def predict_logits(self, x, use_correction=True):
@@ -97,13 +97,13 @@ def update_beta_irls_adaptive(model, X, y, w, lam_base=1e-1, tau_l1=2e-2, gamma=
 
     BW = B * W.unsqueeze(1)
     # Adaptive ridge matrix: lam_base * diag(w)
-    A = BW.t().matmul(B) + lam_base * torch.diag(w)
+    A = BW.t().matmul(B) + lam_base * torch.diag(w) # adaptive ridge penalty
     b = BW.t().matmul(z)
     beta_new = torch.linalg.solve(A, b)
 
     # elementwise soft-threshold on features (skip intercept)
     beta_np = beta_new.detach().cpu().numpy()
-    beta_np[1:] = np.sign(beta_np[1:]) * np.maximum(np.abs(beta_np[1:]) - tau_l1, 0.0)
+    beta_np[1:] = np.sign(beta_np[1:]) * np.maximum(np.abs(beta_np[1:]) - tau_l1, 0.0) # push small coefficient to zero
 
     # trust region
     beta_prev = model.beta.detach().clone()
@@ -128,10 +128,10 @@ def run_nimo(
     *,
     X_val=None, y_val=None,
     hidden_dim=64,
-    dropout=0.15,              # Increased dropout
-    T=25, nn_steps=2, lr=1e-3,
+    dropout=0.15,              # prevent overfitting
+    T=25, nn_steps=2, lr=1e-3, # lr= Adam
     lam_l2=0.5, tau_l1=0.05,   # Much stronger penalties
-    lam_g=0.08,                # L1 on |g_corr| with curriculum
+    lam_g=0.08,                # L1 on |g_corr| with curriculum(graduall increase out_scale)
     lam_group=0.02,            # Group-L2 penalty on NN inputs
     tau_beta_report=0.01,      # Selection threshold
     eps_g=1e-3,
@@ -272,6 +272,13 @@ def run_nimo(
     y_pred = (prob_te >= thr).astype(int)
     f1 = float(f1_score(y_test, y_pred, zero_division=0))
     acc = float(accuracy_score(y_test, y_pred))
+    
+    # Calculate training performance for overfitting analysis
+    with torch.no_grad():
+        prob_train = model.predict_proba(Xt, use_correction=use_corr_final).cpu().numpy()
+    train_pred = (prob_train >= thr).astype(int)
+    train_f1 = float(f1_score(y_train, train_pred, zero_division=0))
+    train_acc = float(accuracy_score(y_train, train_pred))
 
     # ---- 4) Decomposition (test/val) using chosen correction mode
     def decomposition(X_np):
@@ -345,6 +352,8 @@ def run_nimo(
         # flat metrics for your existing plots
         "f1": f1,
         "accuracy": acc,
+        "train_f1": train_f1,
+        "train_accuracy": train_acc,
         "threshold": thr,
 
         "coefficients": json.dumps({

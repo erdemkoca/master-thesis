@@ -11,76 +11,136 @@ import os
 import shutil
 from scipy.special import expit
 
-# ===== Simple, NIMO-inspired scenarios =====
+# ===== Distribution-based scenarios for method comparison =====
 SCENARIOS = {
-    "A": {  # Linear, low-dim
-        "p": 20, "sigma": 0.10, "b0": 0.0,
-        "beta": {0: 2.0, 1: -3.0, 2: 2.0, 3: -2.0, 4: 3.0},
+    "A": {  # Linear baseline
+        "p": 20, "sigma": 0.1, "b0": 0.0,
+        "beta": {0: 2.0, 1: -3.0, 2: 1.5, 3: -2.0},
         "nl": [],
-        "desc": "Linear (low-dim)"
+        "dist": ("normal", 0, 1),
+        "desc": "Scenario A: Purely linear baseline (N(0,1))"
     },
-    "B": {  # Linear, high-dim (p >> n)
-        "p": 200, "sigma": 0.12, "b0": 0.0,
-        "beta": {0: 2.0, 1: -3.0, 2: 2.0, 3: -2.0, 4: 3.0},
-        "nl": [],
-        "desc": "Linear (high-dim)"
+    "B": {  # Main effect + weak tanh term
+        "p": 20, "sigma": 0.1, "b0": 0.0,
+        "beta": {0: 2.0, 1: 0.0, 3: -2.0},  # x1 linear effect kommt aus nl
+        "nl": [
+            ("main_int_tanh", 1, 2, 1.0, 2.0, 1.0)  # x1*(1.0 + 2*tanh(1.0*x2))
+        ],
+        "dist": ("normal", 0, 1),
+        "desc": "Scenario B: Main effect + weak tanh interaction"
     },
-    "C": {  # Linear + simple univariate nonlinearities, low-dim
-        "p": 20, "sigma": 0.15, "b0": 0.0,
-        "beta": {0: 2.0, 1: -3.0, 2: 2.0, 3: -2.0, 4: 3.0},
-        "nl": [("sin", 0, 1.0), ("sin", 1, 0.8), ("sqc", 2, 1.0)],  # sqc: x^2 - 1
-        "desc": "Linear + univariate nonlinearity (low-dim)"
+    "C": {  # Main effect + strong interaction
+        "p": 20, "sigma": 0.1, "b0": 0.0,
+        "beta": {0: 1.5, 1: 0.0, 3: -1.0},
+        "nl": [
+            ("main_int_linear", 1, 2, 2.0, 3.0)  # x1*(2.0 + 3.0*x2)
+        ],
+        "dist": ("normal", 0, 1),
+        "desc": "Scenario C: Main effect + strong x1*x2 interaction"
     },
-    "D": {  # Mixed interactions + nonlinearity, high-dim
-        "p": 200, "sigma": 0.20, "b0": 0.0,
-        "beta": {0: 2.0, 1: -3.0, 2: 2.0, 3: -2.0, 4: 3.0},
-        "nl": [("sin", 0, 0.8), ("sin", 1, 0.8), ("sqc", 2, 0.8),
-               ("int", 0, 1, 1.2), ("int", 2, 3, -1.0)],
-        "desc": "Linear + interactions + nonlinearity (high-dim)"
+    "D": {  # Main effect + tanh interaction, mid-dimensional
+        "p": 50, "sigma": 0.1, "b0": 0.0,
+        "beta": {0: 2.0},
+        "nl": [
+            ("main_int_tanh", 1, 2, 1.0, 4.0, 2.0),  # x1*(1.0 + 4*tanh(2*x2))
+            ("main_int_tanh", 3, 4, 1.0, -3.0, 1.0) # x3*(1.0 - 3*tanh(x4))
+        ],
+        "dist": ("uniform", -3, 3),
+        "desc": "Scenario D: Two main+nonlinear effects (mid-dim)"
     },
+    "E": {  # Main effect + sinus
+        "p": 50, "sigma": 0.1, "b0": 0.0,
+        "beta": {0: 2.0, 1: 0.0, 3: -2.0},
+        "nl": [
+            ("main_int_sin", 1, 2, 1.0, 5.0, 2.0)  # x1*(1.0 + 5*sin(2*x2))
+        ],
+        "dist": ("uniform", -3, 3),
+        "desc": "Scenario E: Main effect + sinus interaction"
+    }
 }
+
 
 def gen_data(n, spec):
     """Generate synthetic data according to specification."""
     rng = np.random.default_rng(42)
     p, sigma, b0 = spec["p"], spec["sigma"], spec.get("b0", 0.0)
 
-    # Create beta vector
+    # Beta vector
     beta = np.zeros(p)
     for j, v in spec["beta"].items():
         beta[j] = float(v)
 
-    # Generate features: X ~ N(0,1), independent
-    X = rng.normal(size=(n, p))
+    # ---- Feature distribution ----
+    dist = spec.get("dist", ("normal", 0, 1))
+    if dist[0] == "normal":
+        mu, std = dist[1], dist[2]
+        X = rng.normal(loc=mu, scale=std, size=(n, p))
+    elif dist[0] == "uniform":
+        low, high = dist[1], dist[2]
+        X = rng.uniform(low, high, size=(n, p))
+    elif dist[0] == "t":
+        df = dist[1]
+        X = rng.standard_t(df, size=(n, p))
+    else:
+        raise ValueError(f"Unknown distribution {dist[0]}")
 
-    # Linear predictor: η = b0 + β^T x
+    # ---- Linear predictor ----
     eta = b0 + X @ beta
 
-    # Add nonlinear terms
+    # ---- Nonlinear terms ----
     for term in spec["nl"]:
         kind = term[0]
-        if kind == "int":     # ( "int", i, j, w )
+        if kind == "int":
             _, i, j, w = term
-            eta += float(w) * (X[:, int(i)] * X[:, int(j)])
-        elif kind == "sin":   # ( "sin", j, w )
+            eta += float(w) * (X[:, i] * X[:, j])
+        elif kind == "int_tanh":
+            _, i, j, w, scale = term
+            eta += float(w) * (X[:, i] * np.tanh(scale * X[:, j]))
+        elif kind == "int_sin":
+            _, i, j, w, scale = term
+            eta += float(w) * (X[:, i] * np.sin(scale * X[:, j]))
+
+        # ---- deine neuen "main+nonlinear" Varianten ----
+        elif kind == "main_int_tanh":
+            # (kind, i, j, base, w, scale)
+            _, i, j, base, w, scale = term
+            eta += X[:, i] * (base + w * np.tanh(scale * X[:, j]))
+
+        elif kind == "main_int_linear":
+            # (kind, i, j, base, w)
+            _, i, j, base, w = term
+            eta += X[:, i] * (base + w * X[:, j])
+
+        elif kind == "main_int_sin":
+            # (kind, i, j, base, w, scale)
+            _, i, j, base, w, scale = term
+            eta += X[:, i] * (base + w * np.sin(scale * X[:, j]))
+
+        # ---- Rest unverändert ----
+        elif kind == "sin":
             _, j, w = term
-            eta += float(w) * np.sin(X[:, int(j)])
-        elif kind == "sqc":   # ( "sqc", j, w ) - centered square: x^2 - 1
+            eta += float(w) * np.sin(X[:, j])
+        elif kind == "sin_scaled":
+            _, j, w, scale = term
+            eta += float(w) * np.sin(scale * X[:, j])
+        elif kind == "tanh":
             _, j, w = term
-            xj = X[:, int(j)]
-            eta += float(w) * (xj * xj - 1.0)
+            eta += float(w) * np.tanh(X[:, j])
+        elif kind == "int_cos":
+            _, i, j, w, scale = term
+            eta += float(w) * (X[:, i] * np.cos(scale * X[:, j]))
+        elif kind == "sqc":
+            _, j, w = term
+            xj = X[:, j]
+            eta += float(w) * (xj**2 - 1.0)
         else:
             raise ValueError(f"Unknown nonlinear term type: {kind}")
 
-    # Additive Gaussian logit noise (NIMO-style)
+    # ---- Noise + Labels ----
     eta += rng.normal(0.0, sigma, size=n)
-
-    # Generate labels: y ~ Bernoulli(σ(η))
     y = rng.binomial(1, expit(eta))
 
-    # True support is the non-zero beta indices
     true_support = np.where(beta != 0)[0].tolist()
-    
     return X, y, beta, true_support
 
 def make_fixed_test_indices(y, test_frac=0.5, seed=123):

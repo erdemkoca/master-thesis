@@ -6,10 +6,11 @@ Defines synthetic and real datasets with their properties
 
 DATASETS = [
     # Synthetic datasets
-    {"kind": "synthetic", "id": "A", "path": "../data/synthetic", "n_train": 140, "n_val": 60, "desc": "Linear (low-dim)"},
-    {"kind": "synthetic", "id": "B", "path": "../data/synthetic", "n_train": 140, "n_val": 60, "desc": "Linear (high-dim)"},
-    {"kind": "synthetic", "id": "C", "path": "../data/synthetic", "n_train": 140, "n_val": 60, "desc": "Linear + univariate nonlinearity (low-dim)"},
-    {"kind": "synthetic", "id": "D", "path": "../data/synthetic", "n_train": 140, "n_val": 60, "desc": "Linear + interactions + nonlinearity (high-dim)"},
+    {"kind": "synthetic", "id": "A", "path": "../data/synthetic", "n_train": 140, "n_val": 60, "desc": "Linear (low-dim) → Lasso optimal"},
+    {"kind": "synthetic", "id": "B", "path": "../data/synthetic", "n_train": 140, "n_val": 60, "desc": "Linear (high-dim) → Lasso optimal"},
+    {"kind": "synthetic", "id": "C", "path": "../data/synthetic", "n_train": 140, "n_val": 60, "desc": "Strong univariate nonlinearities (low-dim) → RF/NN sollten Vorteile zeigen"},
+    {"kind": "synthetic", "id": "D", "path": "../data/synthetic", "n_train": 140, "n_val": 60, "desc": "Nonlinear interactions (high-dim) → NIMO/NN/RF sollten besser als Lasso sein"},
+    {"kind": "synthetic", "id": "E", "path": "../data/synthetic", "n_train": 140, "n_val": 60, "desc": "Purely nonlinear (medium-dim) → Lasso scheitert, nur RF/NN/NIMO gewinnen"},
     
     # Real datasets
     {"kind": "real", "id": "breast_cancer", "path": "../data/real/breast_cancer/processed", "n_train": 140, "n_val": 60, "desc": "Breast Cancer Wisconsin"},
