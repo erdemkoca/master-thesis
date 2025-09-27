@@ -13,50 +13,56 @@ from scipy.special import expit
 
 # ===== Distribution-based scenarios for method comparison =====
 SCENARIOS = {
-    "A": {  # Linear baseline
-        "p": 20, "sigma": 0.1, "b0": 0.0,
-        "beta": {0: 2.0, 1: -3.0, 2: 1.5, 3: -2.0},
-        "nl": [],
-        "dist": ("normal", 0, 1),
-        "desc": "Scenario A: Purely linear baseline (N(0,1))"
-    },
-    "B": {  # Main effect + weak tanh term
-        "p": 20, "sigma": 0.1, "b0": 0.0,
-        "beta": {0: 2.0, 1: 0.0, 3: -2.0},  # x1 linear effect kommt aus nl
-        "nl": [
-            ("main_int_tanh", 1, 2, 1.0, 2.0, 1.0)  # x1*(1.0 + 2*tanh(1.0*x2))
-        ],
-        "dist": ("normal", 0, 1),
-        "desc": "Scenario B: Main effect + weak tanh interaction"
-    },
-    "C": {  # Main effect + strong interaction
-        "p": 20, "sigma": 0.1, "b0": 0.0,
-        "beta": {0: 1.5, 1: 0.0, 3: -1.0},
-        "nl": [
-            ("main_int_linear", 1, 2, 2.0, 3.0)  # x1*(2.0 + 3.0*x2)
-        ],
-        "dist": ("normal", 0, 1),
-        "desc": "Scenario C: Main effect + strong x1*x2 interaction"
-    },
+    # "A": {  # Linear baseline
+    #     "p": 5, "sigma": 0.1, "b0": 0.0,
+    #     "beta": {0: 2.0, 1: -3.0, 2: 1.5, 3: -2.0},
+    #     "nl": [],
+    #     "dist": ("normal", 0, 1),
+    #     "desc": "Scenario A: Purely linear baseline (N(0,1))"
+    # },
+    # "B": {  # Main effect + strong interaction
+    #     "p": 5, "sigma": 0.1, "b0": 0.0,
+    #     # added x2 baseline as well
+    #     "beta": {0: 1.5, 1: 0.5, 2: 0.5, 3: -0.5},
+    #     "nl": [
+    #         ("main_int_linear", 1, 2, 2.0, 15.0)  # x1*(2.0 + 3.0*x2)
+    #     ],
+    #     "dist": ("normal", 0, 1),
+    #     "desc": "Scenario C: Main effect + strong x1*x2 interaction"
+    # },
     "D": {  # Main effect + tanh interaction, mid-dimensional
-        "p": 50, "sigma": 0.1, "b0": 0.0,
-        "beta": {0: 2.0},
+        "p": 5, "sigma": 0.1, "b0": 0.0,
+        # added linear terms for x2 and x4, since they appear in tanh parts
+        "beta": {0: 2.0, 2: 0.5, 4: 0.5},
         "nl": [
-            ("main_int_tanh", 1, 2, 1.0, 4.0, 2.0),  # x1*(1.0 + 4*tanh(2*x2))
-            ("main_int_tanh", 3, 4, 1.0, -3.0, 1.0) # x3*(1.0 - 3*tanh(x4))
+            ("main_int_tanh", 1, 2, 1.0, 1.0, 5.0),   # x1*(1.0 + 4*tanh(2*x2))
+            #("main_int_tanh", 3, 4, 1.0, -3.0, 1.0)  # x3*(1.0 - 3*tanh(x4))
         ],
         "dist": ("uniform", -3, 3),
         "desc": "Scenario D: Two main+nonlinear effects (mid-dim)"
     },
-    "E": {  # Main effect + sinus
-        "p": 50, "sigma": 0.1, "b0": 0.0,
-        "beta": {0: 2.0, 1: 0.0, 3: -2.0},
+    "E": {  # Main effect + tanh interaction, mid-dimensional
+        "p": 5, "sigma": 0.1, "b0": 0.0,
+        # added linear terms for x2 and x4, since they appear in tanh parts
+        "beta": {0: 2.0, 2: 0.5, 4: 0.5},
         "nl": [
-            ("main_int_sin", 1, 2, 1.0, 5.0, 2.0)  # x1*(1.0 + 5*sin(2*x2))
+            ("main_int_tanh", 1, 2, 1.0, 1.0, 20.0),  # x1*(1.0 + 4*tanh(2*x2))
+            # ("main_int_tanh", 3, 4, 1.0, -3.0, 1.0)  # x3*(1.0 - 3*tanh(x4))
         ],
         "dist": ("uniform", -3, 3),
-        "desc": "Scenario E: Main effect + sinus interaction"
-    }
+        "desc": "Scenario D: Two main+nonlinear effects (mid-dim)"
+    },
+    # "F": {  # Main effect + tanh interactions (statt sinus, RF-friendly)
+    #     "p": 15, "sigma": 0.1, "b0": 0.0,
+    #     # added linear terms for x2 and x4
+    #     "beta": {0: 2.0, 1: 0.5, 2: 0.5, 3: -2.0, 4: 0.5},
+    #     "nl": [
+    #         ("main_int_tanh", 1, 2, 1.0, 1.0, 10.0),   # x1*(1.0 + 5*tanh(2*x2))
+    #         ("main_int_tanh", 3, 4, 1.0, -1.0, 10.0)  # x3*(1.0 - 4*tanh(1.5*x4))
+    #     ],
+    #     "dist": ("uniform", -3, 3),
+    #     "desc": "Scenario E: Main effect + two tanh interactions (RF-friendly)"
+    # }
 }
 
 

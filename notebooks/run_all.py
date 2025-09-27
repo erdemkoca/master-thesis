@@ -21,6 +21,7 @@ from sampling import stratified_with_replacement, rebalance_train_indices, get_c
 from methods.lasso import run_lasso
 from methods.lasso_Net import run_lassonet
 from methods.nimo_variants.nimo import run_nimo
+from methods.nimo_variants.baseline import run_nimo_baseline
 from methods.random_forest import run_random_forest
 from methods.neural_net import run_neural_net
 from methods.sparse_neural_net import run_sparse_neural_net
@@ -118,9 +119,10 @@ def run_all_methods(X_tr, y_tr, X_va, y_va, X_te, y_te, seed, feature_names, dat
     """
     methods = [
         ("lasso", run_lasso),
-        #("lassonet", run_lassonet),
+        ("lassonet", run_lassonet),
         ("nimo", run_nimo),
         ("random_forest", run_random_forest),
+        ("nimo_baseline", run_nimo_baseline),
         #("neural_net", run_neural_net),
         #("sparse_neural_net", run_sparse_neural_net),
         #("sparse_linear_baseline", run_sparse_linear_baseline)
@@ -373,4 +375,4 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/all"):
 
 if __name__ == "__main__":
     # Run with default settings
-    df = main(n_iterations=8)  # Start with 3 iterations for testing
+    df = main(n_iterations=1)  # Start with 3 iterations for testing
