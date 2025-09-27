@@ -250,6 +250,7 @@ def run_nimo_baseline(
     X_train, y_train, X_test, y_test,
     iteration, randomState, X_columns=None,
     *,
+    X_val=None, y_val=None,
     max_epochs: int = 50,
     batch_size: int = 64,
     learning_rate: float = 3e-4,
@@ -272,6 +273,14 @@ def run_nimo_baseline(
     ytr = torch.tensor(y_train, dtype=torch.float32)
     Xte = torch.tensor(X_test,  dtype=torch.float32)
     yte = torch.tensor(y_test,  dtype=torch.float32)
+    
+    # Use validation data if available, otherwise use test data for validation
+    if X_val is not None and y_val is not None:
+        Xva = torch.tensor(X_val, dtype=torch.float32)
+        yva = torch.tensor(y_val, dtype=torch.float32)
+    else:
+        Xva = Xte
+        yva = yte
 
     # Create custom dataset that returns dictionaries
     class DictDataset(torch.utils.data.Dataset):
@@ -289,7 +298,7 @@ def run_nimo_baseline(
             }
 
     ds_tr = DictDataset(Xtr, ytr)
-    ds_va = DictDataset(Xte, yte)
+    ds_va = DictDataset(Xva, yva)
     loader_tr = DataLoader(ds_tr, batch_size=batch_size, shuffle=True)
     loader_va = DataLoader(ds_va, batch_size=batch_size)
 
@@ -319,13 +328,23 @@ def run_nimo_baseline(
     # 4) Training
     trainer.fit(model, train_dataloaders=loader_tr, val_dataloaders=loader_va)
 
-    # 5) Vorhersage auf Testset
-    preds = trainer.predict(model, loader_va)  # Liste von 1-D Tensoren
+    # 5) Vorhersage auf Testset (separate DataLoader für Test)
+    ds_te = DictDataset(Xte, yte)
+    loader_te = DataLoader(ds_te, batch_size=batch_size)
+    preds = trainer.predict(model, loader_te)  # Liste von 1-D Tensoren
     probs = torch.cat(preds, dim=0).squeeze().cpu().numpy()
 
-    # 6) Threshold‑Optimierung
+    # 6) Threshold‑Optimierung (use validation data if available, otherwise test data)
     thresholds = np.linspace(0.000, 1.000, 1001)
-    f1s = [f1_score(y_test, (probs>=t).astype(int)) for t in thresholds]
+    if X_val is not None and y_val is not None:
+        # Use validation data for threshold optimization
+        val_preds = trainer.predict(model, loader_va)
+        val_probs = torch.cat(val_preds, dim=0).squeeze().cpu().numpy()
+        f1s = [f1_score(y_val, (val_probs>=t).astype(int)) for t in thresholds]
+    else:
+        # Use test data for threshold optimization (fallback)
+        f1s = [f1_score(y_test, (probs>=t).astype(int)) for t in thresholds]
+    
     best_idx = int(np.argmax(f1s))
     best_thr = thresholds[best_idx]
 
@@ -337,24 +356,37 @@ def run_nimo_baseline(
     else:
         selected_features = [i for i, beta in enumerate(beta_coeffs) if abs(beta) > beta_threshold]
 
+    # Calculate final metrics on test set
+    y_pred = (probs >= best_thr).astype(int)
+    f1 = float(f1_score(y_test, y_pred, zero_division=0))
+    acc = float((y_pred == y_test).mean())
+    
     result = {
-      'model_name':      'nimo_baseline',
-      'iteration':       iteration,
-      'best_threshold':  float(best_thr),
-      'best_f1':         float(f1s[best_idx]),
-      'y_pred':          (probs>=best_thr).astype(int).tolist(),
-      'y_prob':          probs.tolist(),
-      'selected_features': selected_features,
-      'method_has_selection': True,
-      'n_selected': len(selected_features),
-      # zum Debug: hyperparams
-      'hp': {
-        'epochs': max_epochs,
-        'bs': batch_size,
-        'lr': learning_rate,
-        'lasso_pen': lasso_penalty,
-        'group_pen': group_penalty
-      }
+        'model_name': 'nimo_baseline',
+        'iteration': iteration,
+        'random_seed': randomState,
+        'f1': f1,
+        'accuracy': acc,
+        'threshold': float(best_thr),
+        'y_pred': y_pred.tolist(),
+        'y_prob': probs.tolist(),
+        'selected_features': selected_features,
+        'n_selected': len(selected_features),
+        'selection': {
+            'mask': [1 if abs(beta) > beta_threshold else 0 for beta in beta_coeffs],
+            'features': selected_features
+        },
+        'hyperparams': {
+            'max_epochs': int(max_epochs),
+            'batch_size': int(batch_size),
+            'learning_rate': float(learning_rate),
+            'lasso_penalty': float(lasso_penalty),
+            'group_penalty': float(group_penalty),
+            'lasso_norm': float(lasso_norm),
+            'group_norm': float(group_norm),
+            'dropout': float(dropout),
+            'hidden_dim': hidden_dim
+        }
     }
     
     return standardize_method_output(result) 
