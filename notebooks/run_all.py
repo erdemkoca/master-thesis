@@ -122,7 +122,7 @@ def run_all_methods(X_tr, y_tr, X_va, y_va, X_te, y_te, seed, feature_names, dat
         ("lassonet", run_lassonet),
         ("nimo", run_nimo),
         ("random_forest", run_random_forest),
-        ("nimo_baseline", run_nimo_baseline),
+        #("nimo_baseline", run_nimo_baseline),
         #("neural_net", run_neural_net),
         #("sparse_neural_net", run_sparse_neural_net),
         #("sparse_linear_baseline", run_sparse_linear_baseline)

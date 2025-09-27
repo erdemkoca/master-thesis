@@ -13,56 +13,56 @@ from scipy.special import expit
 
 # ===== Distribution-based scenarios for method comparison =====
 SCENARIOS = {
-    # "A": {  # Linear baseline
-    #     "p": 5, "sigma": 0.1, "b0": 0.0,
-    #     "beta": {0: 2.0, 1: -3.0, 2: 1.5, 3: -2.0},
-    #     "nl": [],
-    #     "dist": ("normal", 0, 1),
-    #     "desc": "Scenario A: Purely linear baseline (N(0,1))"
-    # },
-    # "B": {  # Main effect + strong interaction
-    #     "p": 5, "sigma": 0.1, "b0": 0.0,
-    #     # added x2 baseline as well
-    #     "beta": {0: 1.5, 1: 0.5, 2: 0.5, 3: -0.5},
-    #     "nl": [
-    #         ("main_int_linear", 1, 2, 2.0, 15.0)  # x1*(2.0 + 3.0*x2)
-    #     ],
-    #     "dist": ("normal", 0, 1),
-    #     "desc": "Scenario C: Main effect + strong x1*x2 interaction"
-    # },
-    "D": {  # Main effect + tanh interaction, mid-dimensional
+    "A": {  # Linear baseline
         "p": 5, "sigma": 0.1, "b0": 0.0,
-        # added linear terms for x2 and x4, since they appear in tanh parts
-        "beta": {0: 2.0, 2: 0.5, 4: 0.5},
+        "beta": {0: 2.0, 1: -3.0, 2: 1.5, 3: -2.0},
+        "nl": [],
+        "dist": ("normal", 0, 1),
+        "desc": "Scenario A: Purely linear baseline (N(0,1))"
+    },
+    "B": {  # Main effect + strong interaction
+        "p": 5, "sigma": 0.1, "b0": 0.0,
+        # added x2 baseline as well
+        "beta": {0: 1.5, 1: 0.5, 2: 0.5, 3: -0.5},
         "nl": [
-            ("main_int_tanh", 1, 2, 1.0, 1.0, 5.0),   # x1*(1.0 + 4*tanh(2*x2))
-            #("main_int_tanh", 3, 4, 1.0, -3.0, 1.0)  # x3*(1.0 - 3*tanh(x4))
+            ("main_int_linear", 1, 2, 2.0, 15.0)  # x1*(2.0 + 3.0*x2)
+        ],
+        "dist": ("normal", 0, 1),
+        "desc": "Scenario C: Main effect + strong x1*x2 interaction"
+    },
+    "C": {
+        "p": 3, "sigma": 0.1, "b0": 1.0,  # b0=1 gives the +1 constant
+        "beta": {},  # no extra linear terms
+        "nl": [
+            ("main_int_tanh", 0, 1, 1.0, 2.0, 1.0),      # 2 * x1 * (1 + 2*tanh(x2))
+            ("main_int_sin", 1, 0, -2.0, 6.0, 2.0),      # -2 * x2 * (3*sin(2*x1))
+            ("main_int_tanh", 1, 0, 0.0, -2.0, 2.0)      # -2 * x2 * (tanh(2*x1))
         ],
         "dist": ("uniform", -3, 3),
-        "desc": "Scenario D: Two main+nonlinear effects (mid-dim)"
+        "desc": "Scenario F: matches screenshot equation"
     },
-    "E": {  # Main effect + tanh interaction, mid-dimensional
-        "p": 5, "sigma": 0.1, "b0": 0.0,
-        # added linear terms for x2 and x4, since they appear in tanh parts
-        "beta": {0: 2.0, 2: 0.5, 4: 0.5},
+    "D": {
+        "p": 10, "sigma": 0.1, "b0": -10.0,  # constant -10
+        "beta": {3: 10.0},  # +10 * x4
         "nl": [
-            ("main_int_tanh", 1, 2, 1.0, 1.0, 20.0),  # x1*(1.0 + 4*tanh(2*x2))
-            # ("main_int_tanh", 3, 4, 1.0, -3.0, 1.0)  # x3*(1.0 - 3*tanh(x4))
+            # 10 * x1 * (1 + 2*tanh(2*x2))
+            ("main_int_tanh", 0, 1, 1.0, 2.0, 2.0),
+
+            # 10 * x1 * sin(x4)
+            ("main_int_sin", 0, 3, 0.0, 10.0, 1.0),
+
+            # 20 * x2 * (1 + 2*cos(2*x1))
+            ("main_int_cos", 1, 0, 1.0, 2.0, 2.0),  # you'd need to add main_int_cos handler
+
+            # -20 * x3 * (1 + 2*arctan(x2*x4))
+            ("main_int_arctan_prod", 2, 1, 3, -20.0, 1.0, 2.0, 1.0)
+
         ],
         "dist": ("uniform", -3, 3),
-        "desc": "Scenario D: Two main+nonlinear effects (mid-dim)"
-    },
-    # "F": {  # Main effect + tanh interactions (statt sinus, RF-friendly)
-    #     "p": 15, "sigma": 0.1, "b0": 0.0,
-    #     # added linear terms for x2 and x4
-    #     "beta": {0: 2.0, 1: 0.5, 2: 0.5, 3: -2.0, 4: 0.5},
-    #     "nl": [
-    #         ("main_int_tanh", 1, 2, 1.0, 1.0, 10.0),   # x1*(1.0 + 5*tanh(2*x2))
-    #         ("main_int_tanh", 3, 4, 1.0, -1.0, 10.0)  # x3*(1.0 - 4*tanh(1.5*x4))
-    #     ],
-    #     "dist": ("uniform", -3, 3),
-    #     "desc": "Scenario E: Main effect + two tanh interactions (RF-friendly)"
-    # }
+        "desc": "Scenario G: Complex nonlinear interactions with tanh, sin, cos, arctan"
+    }
+
+
 }
 
 
@@ -139,6 +139,18 @@ def gen_data(n, spec):
             _, j, w = term
             xj = X[:, j]
             eta += float(w) * (xj**2 - 1.0)
+        elif kind == "main_int_cos":
+            # (kind, i, j, base, w, scale)
+            _, i, j, base, w, scale = term
+            eta += X[:, i] * (base + w * np.cos(scale * X[:, j]))
+        elif kind == "main_int_arctan_prod":
+
+            # (kind, i, j, k, factor, base, w, scale)
+
+            _, i, j, k, factor, base, w, scale = term
+
+            eta += factor * X[:, i] * (base + w * np.arctan(scale * (X[:, j] * X[:, k])))
+
         else:
             raise ValueError(f"Unknown nonlinear term type: {kind}")
 
