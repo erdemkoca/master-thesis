@@ -14,32 +14,32 @@ from scipy.special import expit
 # ===== Distribution-based scenarios for method comparison =====
 SCENARIOS = {
     "A": {  # Linear baseline
-        "p": 5, "sigma": 0.1, "b0": 0.0,
+        "p": 5, "sigma": 0.1, "b0": 1.0,
         "beta": {0: 2.0, 1: -3.0, 2: 1.5, 3: -2.0},
         "nl": [],
         "dist": ("normal", 0, 1),
         "desc": "Scenario A: Purely linear baseline (N(0,1))"
     },
     "B": {  # Main effect + strong interaction
-        "p": 5, "sigma": 0.1, "b0": 0.0,
+        "p": 5, "sigma": 0.1, "b0": 0.5,
         # added x2 baseline as well
         "beta": {0: 1.5, 1: 0.5, 2: 0.5, 3: -0.5},
         "nl": [
-            ("main_int_linear", 1, 2, 2.0, 15.0)  # x1*(2.0 + 3.0*x2)
+            ("main_int_linear", 1, 2, 2.0, 15.0)
         ],
         "dist": ("normal", 0, 1),
         "desc": "Scenario C: Main effect + strong x1*x2 interaction"
     },
     "C": {
-        "p": 3, "sigma": 0.1, "b0": 1.0,  # b0=1 gives the +1 constant
-        "beta": {},  # no extra linear terms
-        "nl": [
-            ("main_int_tanh", 0, 1, 1.0, 2.0, 1.0),      # 2 * x1 * (1 + 2*tanh(x2))
-            ("main_int_sin", 1, 0, -2.0, 6.0, 2.0),      # -2 * x2 * (3*sin(2*x1))
-            ("main_int_tanh", 1, 0, 0.0, -2.0, 2.0)      # -2 * x2 * (tanh(2*x1))
-        ],
-        "dist": ("uniform", -3, 3),
-        "desc": "Scenario F: matches screenshot equation"
+      "p": 3, "sigma": 0.1, "b0": 1.0,
+      "beta": {0: 2.0, 1: -2.0},
+      "nl": [
+        ("main_int_tanh", 0, 1, 0.0,  4.0, 1.0),   # 4*x0*tanh(x1)
+        ("main_int_sin",  1, 0, 0.0, -6.0, 2.0),   # -6*x1*sin(2*x0)
+        ("main_int_tanh", 1, 0, 0.0, -2.0, 2.0)    # -2*x1*tanh(2*x0)
+      ],
+      "dist": ("uniform", -3, 3),
+      "desc": "Scenario C: matches screenshot equation"
     },
     "D": {
         "p": 10, "sigma": 0.1, "b0": -10.0,  # constant -10
@@ -60,9 +60,41 @@ SCENARIOS = {
         ],
         "dist": ("uniform", -3, 3),
         "desc": "Scenario G: Complex nonlinear interactions with tanh, sin, cos, arctan"
+    },
+    "E": {
+        "p": 3, "sigma": 0.1, "b0": 1.0,  # b0=1 gives the +1 constant
+        "beta": {},  # no extra linear terms
+        "nl": [
+            ("main_int_tanh", 0, 1, 1.0, 2.0, 1.0),      # 2 * x1 * (1 + 2*tanh(x2))
+            ("main_int_sin", 1, 0, -2.0, 6.0, 2.0),      # -2 * x2 * (3*sin(2*x1))
+            ("main_int_tanh", 1, 0, 0.0, -2.0, 2.0)      # -2 * x2 * (tanh(2*x1))
+        ],
+        "dist": ("uniform", -3, 3),
+        "desc": "Scenario F: matches screenshot equation"
+    },
+    "F": {
+      "p": 50, "sigma": 0.1, "b0": 1.0,
+      # linear parts pulled out explicitly:
+      "beta": {0: -20.0, 1:  20.0, 3:  30.0, 4: -10.0},
+
+      # set base=0.0 to avoid double-counting; keep the interaction weights:
+      "nl": [
+        # -20 * x0 * [1 + tanh(x1*x3)]  ->  -20*x0  +  (-20)*x0*tanh(...)
+        ("main_int_tanh_prod",   0, 1, 3, 0.0, -20.0, 1.0),
+
+        #  20 * x1 * [1 + (2/pi) * arctan(x3 - x4)]
+        # interaction weight = 20*(2/pi) = 40/pi
+        ("main_int_arctan_diff", 1, 3, 4, 0.0,  40.0/np.pi, 1.0),
+
+        #  30 * x3 * [1 + tanh(x1 + sin(x4))]
+        ("main_int_tanh_x_plus_sin", 3, 1, 4, 0.0, 30.0, 1.0),
+
+        # -10 * x4 * [1 + tanh(0.5 * x0 * x3)]
+        ("main_int_tanh_prod",   4, 0, 3, 0.0, -10.0, 0.5)
+      ],
+      "dist": ("normal", 0, 1),
+      "desc": "Scenario F: NIMO Setting 3 (classification)"
     }
-
-
 }
 
 
@@ -150,6 +182,21 @@ def gen_data(n, spec):
             _, i, j, k, factor, base, w, scale = term
 
             eta += factor * X[:, i] * (base + w * np.arctan(scale * (X[:, j] * X[:, k])))
+
+        elif kind == "main_int_tanh_prod":
+            # (kind, i, j, k, base, w, scale)
+            _, i, j, k, base, w, scale = term
+            eta += X[:, i] * (base + w * np.tanh(scale * (X[:, j] * X[:, k])))
+
+        elif kind == "main_int_arctan_diff":
+            # (kind, i, j, k, base, w, scale)
+            _, i, j, k, base, w, scale = term
+            eta += X[:, i] * (base + w * np.arctan(scale * (X[:, j] - X[:, k])))
+
+        elif kind == "main_int_tanh_x_plus_sin":
+            # (kind, i, j, k, base, w, scale)  # scale applies to sin
+            _, i, j, k, base, w, scale = term
+            eta += X[:, i] * (base + w * np.tanh(X[:, j] + np.sin(scale * X[:, k])))
 
         else:
             raise ValueError(f"Unknown nonlinear term type: {kind}")

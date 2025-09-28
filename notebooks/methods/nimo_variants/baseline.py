@@ -1,254 +1,361 @@
 """
 NIMO Baseline Variant - Adaptive Ridge Logistic Regression with Lightning
+(Stabilized IRLS; epoch-wise beta updates; probability outputs; HParam sweep)
+- Self-features are ENABLED by default: ["x2","sin","tanh","arctan"]
 """
 
+import os
+import sys
+import math
+import itertools
+from typing import Dict, Any, List, Optional, Tuple
+
+import numpy as np
 import torch
 import torch.nn as nn
 import lightning as L
-import numpy as np
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from sklearn.metrics import f1_score
-import sys
-import os
+
+# Lightning EarlyStopping (optional)
+try:
+    from lightning.pytorch.callbacks import EarlyStopping
+except Exception:
+    EarlyStopping = None
+
+# Allow relative utils import if present
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from utils import standardize_method_output
-except ImportError as e:
-    print(f"Import error in baseline.py: {e}")
-    # Fallback: define a simple version
-    def standardize_method_output(result):
-        # Simple conversion to native types
-        import numpy as np
-        converted = {}
+except Exception:
+    def standardize_method_output(result: Dict[str, Any]) -> Dict[str, Any]:
+        out = {}
         for k, v in result.items():
             if isinstance(v, np.ndarray):
-                converted[k] = v.tolist()
+                out[k] = v.tolist()
             elif isinstance(v, (np.integer, np.int64, np.int32, np.int16, np.int8)):
-                converted[k] = int(v)
+                out[k] = int(v)
             elif isinstance(v, (np.floating, np.float64, np.float32, np.float16)):
-                converted[k] = float(v)
+                out[k] = float(v)
             else:
-                converted[k] = v
-        return converted
+                out[k] = v
+        return out
 
 
-def to_bin(x, n_bits):
-    return np.array([int(b) for b in format(x, f'0{n_bits}b')]) - 0.5  # -0.5 to make it -0.5 and 0.5
+# -------------------- helpers --------------------
 
+def to_bin(x: int, n_bits: int) -> np.ndarray:
+    # centered bits in {-0.5, +0.5}
+    return np.array([int(b) for b in format(x, f'0{n_bits}b')], dtype=np.float32) - 0.5
+
+
+def add_self_features(
+    X: np.ndarray,
+    self_features: Optional[List[str]] = None
+) -> Tuple[np.ndarray, List[Tuple[int, str]]]:
+    """
+    Expand X with simple self-nonlinearities to help NIMO capture self-terms.
+
+    self_features: list of transforms to apply to each column of X.
+      Supported: "x2", "x3", "sin", "cos", "abs", "tanh", "arctan" (alias: "atan")
+    Returns (X_expanded, mapping) where mapping holds (orig_col_idx, transform_name)
+    """
+    if self_features is None:
+        # DEFAULT: enable a strong but compact set
+        self_features = ["x2", "sin", "tanh", "arctan"]
+
+    if not self_features:
+        return X.astype(np.float32), []
+
+    transforms = {
+        "x2":    lambda v: v * v,
+        "x3":    lambda v: v * v * v,
+        "sin":   lambda v: np.sin(v),
+        "cos":   lambda v: np.cos(v),
+        "abs":   lambda v: np.abs(v),
+        "tanh":  lambda v: np.tanh(v),
+        "arctan":lambda v: np.arctan(v),
+        "atan":  lambda v: np.arctan(v),
+    }
+    new_cols = []
+    mapping = []
+    for j in range(X.shape[1]):
+        col = X[:, j:j+1]
+        for name in self_features:
+            fn = transforms.get(name)
+            if fn is None:
+                continue
+            new_cols.append(fn(col))
+            mapping.append((j, name))
+
+    if new_cols:
+        X_new = np.concatenate([X] + new_cols, axis=1).astype(np.float32)
+    else:
+        X_new = X.astype(np.float32)
+    return X_new, mapping
+
+
+class DictDataset(torch.utils.data.Dataset):
+    def __init__(self, features: torch.Tensor, targets: torch.Tensor):
+        self.features = features
+        self.targets = targets
+    def __len__(self):
+        return len(self.features)
+    def __getitem__(self, idx):
+        return {'features': self.features[idx], 'target': self.targets[idx]}
+
+
+# -------------------- Model --------------------
 
 class AdaptiveRidgeLogisticRegression(L.LightningModule):
-    def __init__(self, input_dim, output_dim, learning_rate=3e-4, \
-                 lasso_penalty=0.01, group_penalty=1.0, lasso_norm=0.5, group_norm=0.25, \
-                 dropout=0, hidden_dim=None):
+    """
+    Neural-Interaction + Adaptive Ridge Logistic Regression (NIMO-style)
+    - NN modulates interactions excluding self (via CO mask).
+    - Epoch-wise stabilized IRLS to update beta (once per epoch).
+    - NN (and c, beta_0, alpha2) trained via SGD.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int = 1,
+        learning_rate: float = 3e-4,
+        lasso_penalty: float = 0.01,
+        group_penalty: float = 1.0,
+        lasso_norm: float = 0.5,
+        group_norm: float = 0.25,
+        dropout: float = 0.0,
+        hidden_dim: Optional[int] = None,
+        noise_std: float = 0.2,
+    ):
         super().__init__()
 
-        self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.lr = learning_rate
+        self.input_dim = int(input_dim)
+        self.output_dim = int(output_dim)
+        self.lr = float(learning_rate)
 
-        self.lambda_ = 1.0
-        self.lasso_penalty = lasso_penalty
-        self.group_penalty = group_penalty
-        self.lasso_norm = lasso_norm
-        self.group_norm = group_norm
-        self.dropout = dropout
+        self.lasso_penalty = float(lasso_penalty)
+        self.group_penalty = float(group_penalty)
+        self.lasso_norm = float(lasso_norm)
+        self.group_norm = float(group_norm)
+        self.dropout = float(dropout)
+        self.noise_std = float(noise_std)
 
         self.save_hyperparameters()
 
-        # create binary map, for positional encoding
-        self.n_bits = int(np.floor(np.log2(input_dim))) + 1
-        BinMap = np.vstack([to_bin(i, self.n_bits) for i in range(1, input_dim + 1)])   # p x n_bits
+        # Positional encoding via binary map
+        self.n_bits = int(np.floor(np.log2(self.input_dim))) + 1
+        bin_map = np.vstack([to_bin(i, self.n_bits) for i in range(1, self.input_dim + 1)])  # (p, n_bits)
 
-        # figure out whether we have a GPU or not
-        self.device_ = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # CO: mask-out self + append positional bits
+        CO = np.ones((self.input_dim, self.input_dim), dtype=np.float32)
+        np.fill_diagonal(CO, 0.0)
+        CO = np.hstack([CO, bin_map.astype(np.float32)])  # (p, p + n_bits)
 
-        # move yourself (so that any .to(self.device_) below is a no-op once patched)
-        super().to(self.device_)
+        # Register buffers so Lightning moves devices
+        self.register_buffer("CO", torch.from_numpy(CO))                  # (p, p+n_bits)
+        self.register_buffer("beta", torch.randn(self.input_dim) * 0.1)   # (p,)
 
-        # create CO matrix and send to the right device
-        CO = np.ones((input_dim, input_dim))
-        np.fill_diagonal(CO, 0)
-        CO = np.hstack([CO, BinMap])
-        self.CO = torch.tensor(CO, dtype=torch.float32, device=self.device_)
+        # Trainable scalars / vectors
+        self.beta_0 = nn.Parameter(torch.randn(1) * 0.1)
+        self.c = nn.Parameter(torch.ones(self.input_dim) * 0.1)
+        self.alpha2 = nn.Parameter(torch.tensor(2.0))
 
         # MLP definition
-        if hidden_dim is not None:
-            self.fc1 = nn.Linear(self.input_dim + self.n_bits, hidden_dim)
-            self.fc2 = nn.Linear(hidden_dim + self.n_bits, hidden_dim)
-            self.fc3 = nn.Linear(hidden_dim + hidden_dim + self.n_bits, self.output_dim)
-        else:
-            self.fc1 = nn.Linear(self.input_dim + self.n_bits, 64)
-            self.fc2 = nn.Linear(64 + self.n_bits, 128)
-            self.fc3 = nn.Linear(128 + 64 + self.n_bits, self.output_dim)
+        in1 = self.input_dim + self.n_bits
+        h1 = hidden_dim if hidden_dim is not None else 64
+        h2 = hidden_dim if hidden_dim is not None else 128
 
-        # self.dropout1 = nn.Dropout(p=dropout) if dropout > 0 else nn.Identity()
-        self.dropout2 = nn.Dropout(p=dropout) if dropout > 0 else nn.Identity()
+        self.fc1 = nn.Linear(in1, h1)
+        self.fc2 = nn.Linear(h1 + self.n_bits, h2)
+        self.fc3 = nn.Linear(h2 + h1 + self.n_bits, self.output_dim)
+        self.dropout2 = nn.Dropout(p=self.dropout) if self.dropout > 0 else nn.Identity()
 
-        self.register_buffer("beta", torch.randn(self.input_dim, device=self.device_))
-        self.beta_0 = nn.Parameter(torch.randn(1, device=self.device_)*0.1)
-        self.c = nn.Parameter(torch.ones(self.input_dim, device=self.device_) * 0.1)
-        self.alpha2 = nn.Parameter(torch.tensor(2.0, device=self.device_))
+        # Accumulators for epoch-wise IRLS
+        self.A_sum = None  # (p, p)
+        self.b_sum = None  # (p,)
 
-    def forward_MLP(self, X):
+        # vmap availability
+        self._use_vmap = hasattr(torch, "vmap")
+
+    def forward_MLP(self, X: torch.Tensor) -> torch.Tensor:
+        """
+        X: (B, p + n_bits) where first p columns are features
+        """
         z1 = self.fc1(X)
-        # z1 = self.dropout1(z1)
-        z1 = torch.tanh(0.3 * (z1 + 0.2 * torch.randn_like(z1)))    # Noise injection
-        z1 = torch.cat([z1, X[:, self.input_dim:(self.input_dim + self.n_bits)]], dim=1)
-        z2 = torch.sin(2 * np.pi * self.fc2(z1))
+        if self.training and self.noise_std > 0:
+            z1 = z1 + self.noise_std * torch.randn_like(z1)
+        z1 = torch.tanh(0.3 * z1)
+
+        pos = X[:, self.input_dim:(self.input_dim + self.n_bits)]
+        z1p = torch.cat([z1, pos], dim=1)
+
+        z2 = torch.sin(2 * math.pi * self.fc2(z1p))
         z2 = self.dropout2(z2)
-        z = torch.cat([z2, z1], dim=1)
-        return self.fc3(z)
 
-    def build_B_u(self, X):
-        # B_u = X + X * G_u = X * (1 + G_u)
-        # X: Bxp, A_mat: Bx(p+n_bits)
-        A_mat = torch.cat([X, torch.ones((X.size(0), self.n_bits), device=X.device)], dim=1)
+        z = torch.cat([z2, z1p], dim=1)
+        return self.fc3(z)  # (B, 1)
 
-        def G_K(C):
-            B = A_mat * C
-            B_zero = torch.cat([torch.zeros(1, self.input_dim, device=B.device), B[0, self.input_dim:(self.input_dim + self.n_bits)].unsqueeze(0)], dim=1)
-            z = self.forward_MLP(B)
-            z_zero = self.forward_MLP(B_zero)
+    def _G_K_single(self, A_mat: torch.Tensor, C_row: torch.Tensor) -> torch.Tensor:
+        """
+        Helper when vmap is unavailable. Returns (B,) multiplicative modulator for one feature j.
+        """
+        B_full = A_mat * C_row  # (B, p+n_bits)
 
-            z = 2*(torch.tanh(z)) + 1
-            z_zero = 2*(torch.tanh(z_zero)) + 1
-            z = z - z_zero
+        # baseline: zero features, same positional bits from first row
+        pos0 = B_full[0, self.input_dim:(self.input_dim + self.n_bits)].unsqueeze(0)  # (1, n_bits)
+        B_zero = torch.cat([torch.zeros(1, self.input_dim, device=A_mat.device, dtype=A_mat.dtype), pos0], dim=1)
 
-            # z = torch.tanh(z)
-            z = z * 0.5 * (1.0 + torch.tanh(self.alpha2))
+        z = self.forward_MLP(B_full)   # (B, 1)
+        z0 = self.forward_MLP(B_zero)  # (1, 1)
 
-            return z + 1
+        z = 2 * torch.tanh(z) + 1
+        z0 = 2 * torch.tanh(z0) + 1
+        z = z - z0  # center
+        z = z * 0.5 * (1.0 + torch.tanh(self.alpha2))
+        return (z + 1.0).squeeze(-1)  # (B,)
 
-        G_u = torch.vmap(G_K, randomness="different")(self.CO).squeeze()
-        G_u = G_u.T
+    def build_B_u(self, X: torch.Tensor) -> torch.Tensor:
+        """
+        B_u = X * (1 + G_u(X)), where G_u excludes self-interactions via CO.
+        X: (B, p)
+        returns: (B, p)
+        """
+        B, p = X.shape
+        assert p == self.input_dim
+        A_mat = torch.cat([X, torch.ones((B, self.n_bits), device=X.device, dtype=X.dtype)], dim=1)  # (B, p+n_bits)
+
+        if self._use_vmap:
+            def G_K(C_row):
+                B_full = A_mat * C_row
+                pos0 = B_full[0, self.input_dim:(self.input_dim + self.n_bits)].unsqueeze(0)
+                B_zero = torch.cat([torch.zeros(1, self.input_dim, device=X.device, dtype=X.dtype), pos0], dim=1)
+                z = self.forward_MLP(B_full)
+                z0 = self.forward_MLP(B_zero)
+                z = 2 * torch.tanh(z) + 1
+                z0 = 2 * torch.tanh(z0) + 1
+                z = z - z0
+                z = z * 0.5 * (1.0 + torch.tanh(self.alpha2))
+                return z + 1.0  # (B, 1)
+
+            G_u = torch.vmap(G_K, randomness="different")(self.CO).squeeze(-1)  # (p, B)
+            G_u = G_u.T  # (B, p)
+        else:
+            # Fallback: loop over features
+            outs = []
+            for j in range(self.CO.size(0)):  # p rows
+                outs.append(self._G_K_single(A_mat, self.CO[j]))
+            G_u = torch.stack(outs, dim=1)  # (B, p)
+
         B_u = X * G_u
-
         return B_u
 
-    def forward(self, B_u):
-        B_u = torch.cat([torch.ones(B_u.size(0), 1, device=B_u.device), B_u], dim=1)
-        beta = torch.cat([self.beta_0, self.beta])
+    def forward(self, B_u: torch.Tensor) -> torch.Tensor:
+        """
+        Linear logit with current beta. Returns logits (B,)
+        """
+        B1 = torch.cat([torch.ones(B_u.size(0), 1, device=B_u.device, dtype=B_u.dtype), B_u], dim=1)  # (B, p+1)
+        beta_full = torch.cat([self.beta_0, self.beta], dim=0)  # (p+1,)
+        return (B1 @ beta_full).view(-1)
 
-        y_hat = B_u @ beta
-        return y_hat
+    # -------- training (epoch-wise IRLS) --------
+
+    def on_train_epoch_start(self):
+        p = self.input_dim
+        self.A_sum = torch.zeros(p, p, device=self.device, dtype=self.beta.dtype)
+        self.b_sum = torch.zeros(p, device=self.device, dtype=self.beta.dtype)
 
     def training_step(self, batch, batch_idx):
-        x, y = batch['features'], batch['target']
+        x = batch['features']
+        y = batch['target'].view(-1)
+
         B_u = self.build_B_u(x)
-        c = torch.abs(self.c)
-
-        # iteratively update beta
         y_hat = self.forward(B_u)
-        
-        pi = 0.999 * torch.sigmoid(y_hat) + 0.0005      # Important for numerical stability
 
-        w = pi * (1 - pi)
-        dw = torch.diag(w.squeeze())
-        dc = torch.diag(c.squeeze())
-        
-        X_tilde = B_u @ dc
-        A = X_tilde.T @ dw @ X_tilde + torch.eye(self.input_dim, device=x.device)
-        q = y_hat + (y - pi) / w
-        b = X_tilde.T @ dw @ q
-        gammma = torch.linalg.solve(A, b)
-        new_beta = c * gammma
+        # Main loss for NN params
+        bce_loss = nn.BCEWithLogitsLoss()(y_hat, y)
 
-        B_u = torch.cat([torch.ones(B_u.size(0), 1, device=B_u.device), B_u], dim=1)
-        beta = torch.cat([self.beta_0, new_beta])
-        y_hat_new = B_u @ beta
-
-        # compute losses
-        bce_loss = torch.nn.BCEWithLogitsLoss()(y_hat_new, y)
-        lasso_loss = self.lasso_penalty * torch.sum((self.c ** 2) ** self.lasso_norm)
-        group_loss = self.group_penalty * torch.sum(torch.norm(self.fc1.weight[:, :self.input_dim], dim=0) ** self.group_norm)
+        # Regularizers
+        lasso_loss = self.lasso_penalty * torch.sum((self.c.abs() ** 2) ** self.lasso_norm)
+        group_cols = self.fc1.weight[:, :self.input_dim]
+        group_loss = self.group_penalty * torch.sum(torch.norm(group_cols, dim=0) ** self.group_norm)
         loss = bce_loss + lasso_loss + group_loss
 
-        # update beta
-        self.beta.data = new_beta
+        # Accumulate stabilized IRLS
+        with torch.no_grad():
+            pi = 0.999 * torch.sigmoid(y_hat) + 0.0005
+            w = (pi * (1.0 - pi)).clamp_min(1e-3)  # stability
+            c_pos = self.c.abs()
 
-        # compute binary accuracy
-        y_hat_new = torch.sigmoid(y_hat_new)
-        pred = (y_hat_new > 0.5).float()
-        acc = (pred == y).float().mean()
+            X_tilde = B_u * c_pos  # (B, p)
+            self.A_sum.add_((X_tilde * w.unsqueeze(1)).T @ X_tilde)
+            q = y_hat + (y - pi) / w
+            self.b_sum.add_((X_tilde * w.unsqueeze(1)).T @ q)
 
-        # log
-        self.log('train_loss', loss, on_epoch=True, prog_bar=True)
-        self.log('train_bce', bce_loss, on_epoch=True, prog_bar=True)
-        self.log('train_lasso', lasso_loss, on_epoch=True, prog_bar=True)
-        self.log('train_group', group_loss, on_epoch=True, prog_bar=True)
-        self.log('train_acc', acc, on_epoch=True, prog_bar=True)
-        return loss  
-    
-    def on_train_batch_end(self, outputs, batch, batch_idx):
-        if self.logger is not None:
-            self.logger.experiment.add_histogram('beta', self.beta, global_step=self.global_step)
-            self.logger.experiment.add_histogram('c', self.c, global_step=self.global_step)
+        self.log('train_loss', loss, on_epoch=True, prog_bar=True, on_step=False)
+        return loss
+
+    def on_train_epoch_end(self):
+        with torch.no_grad():
+            p = self.input_dim
+            eye = torch.eye(p, device=self.device, dtype=self.beta.dtype)
+            A = self.A_sum + eye
+            c_pos = self.c.abs()
+            try:
+                gamma = torch.linalg.solve(A, self.b_sum)
+            except RuntimeError:
+                gamma = torch.linalg.solve(A + 1e-3 * eye, self.b_sum)
+            new_beta = c_pos * gamma
+            self.beta.copy_(new_beta)
+
         self.log('beta_0', self.beta_0, on_epoch=True, prog_bar=True)
         self.log('alpha2', self.alpha2, on_epoch=True, prog_bar=True)
-    
+
+    # -------- eval / predict --------
+
     def validation_step(self, batch, batch_idx):
-        x, y = batch['features'], batch['target']
+        x = batch['features']
+        y = batch['target'].view(-1)
         B_u = self.build_B_u(x)
         y_hat = self.forward(B_u)
         loss = nn.BCEWithLogitsLoss()(y_hat, y)
-
-        # compute binary accuracy
-        y_hat = torch.sigmoid(y_hat)
-        pred = (y_hat > 0.5).float()
-        acc = (pred == y).float().mean()
-
+        y_prob = torch.sigmoid(y_hat)
+        acc = ((y_prob > 0.5).float() == y).float().mean()
         self.log('val_loss', loss, on_epoch=True, prog_bar=True)
         self.log('val_acc', acc, on_epoch=True, prog_bar=True)
 
     def test_step(self, batch, batch_idx):
-        x, y = batch['features'], batch['target']
+        x = batch['features']
+        y = batch['target'].view(-1)
         B_u = self.build_B_u(x)
         y_hat = self.forward(B_u)
         loss = nn.BCEWithLogitsLoss()(y_hat, y)
-        
-        # compute binary accuracy
-        y_hat = torch.sigmoid(y_hat)
-        pred = (y_hat > 0.5).float()
-        acc = (pred == y).float().mean()
+        y_prob = torch.sigmoid(y_hat)
+        acc = ((y_prob > 0.5).float() == y).float().mean()
+        print(f"Test loss: {loss.item():.6f} | Test ACC: {acc.item():.4f}")
 
-        print(f"Test loss: {loss}")
-        print(f"Test ACC: {acc}")
-    
     def predict_step(self, batch, batch_idx):
-        x, y = batch['features'], batch['target']
+        x = batch['features']
         B_u = self.build_B_u(x)
         y_hat = self.forward(B_u)
-        loss = nn.BCEWithLogitsLoss()(y_hat, y)
-        print(f"Predict loss: {loss}")
-        
-        # return y_hat
-        
-        # compute binary accuracy
-        y_hat = torch.sigmoid(y_hat)
-        pred = (y_hat > 0.5).float()
-
-        acc = (pred == y).float().mean()
-        print(f"Predict ACC: {acc}")
-        return pred
-
-    def custom_prediction(self, x):
-        B_u = self.build_B_u(x)
-        y_hat = self.forward(B_u)
-        return y_hat
+        return torch.sigmoid(y_hat).detach()
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(list(self.fc1.parameters()) + \
-                                     list(self.fc2.parameters()) + \
-                                     list(self.fc3.parameters()) + \
-                                     [self.beta_0] + [self.c] + [self.alpha2], lr=self.lr)
+        params = (
+            list(self.fc1.parameters())
+            + list(self.fc2.parameters())
+            + list(self.fc3.parameters())
+            + [self.beta_0, self.c, self.alpha2]
+        )
+        return torch.optim.Adam(params, lr=self.lr)
 
-        return optimizer
 
+# -------------------- Runner (single config) --------------------
 
 def run_nimo_baseline(
     X_train, y_train, X_test, y_test,
-    iteration, randomState, X_columns=None,
+    iteration: int, randomState: int,
+    X_columns: Optional[List[str]] = None,
     *,
     X_val=None, y_val=None,
     max_epochs: int = 50,
@@ -259,121 +366,139 @@ def run_nimo_baseline(
     lasso_norm: float = 0.5,
     group_norm: float = 0.25,
     dropout: float = 0.0,
-    hidden_dim: int = None,
-):
+    hidden_dim: Optional[int] = None,
+    standardize: bool = True,
+    num_workers: int = 0,
+    self_features: Optional[List[str]] = None,   # default enabled below
+    early_stop_patience: Optional[int] = 10,
+    noise_std: float = 0.2,
+) -> Dict[str, Any]:
     """
-    NIMO Baseline - Adaptive Ridge Logistic Regression with Lightning
+    Train one NIMO config and evaluate. Returns standardized dict with metrics.
+    Notes:
+      - Self-features default: ["x2","sin","tanh","arctan"]
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Default self-features if not specified
+    if self_features is None:
+        self_features = ["x2", "sin", "tanh", "arctan"]
+
     torch.manual_seed(randomState)
     np.random.seed(randomState)
+    use_gpu = torch.cuda.is_available()
 
-    # 1) DataLoader aufsetzen
-    Xtr = torch.tensor(X_train, dtype=torch.float32)
-    ytr = torch.tensor(y_train, dtype=torch.float32)
-    Xte = torch.tensor(X_test,  dtype=torch.float32)
-    yte = torch.tensor(y_test,  dtype=torch.float32)
-    
-    # Use validation data if available, otherwise use test data for validation
+    # Optional self-feature engineering BEFORE standardization
+    Xtr_np = np.asarray(X_train, dtype=np.float32)
+    Xte_np = np.asarray(X_test, dtype=np.float32)
+    if X_val is not None:
+        Xva_np = np.asarray(X_val, dtype=np.float32)
+
+    Xtr_np, mapping = add_self_features(Xtr_np, self_features)
+    Xte_np, _ = add_self_features(Xte_np, self_features)
+    if X_val is not None:
+        Xva_np, _ = add_self_features(Xva_np, self_features)
+
+    # Standardize using train stats
+    if standardize:
+        mean = Xtr_np.mean(axis=0, keepdims=True)
+        std = Xtr_np.std(axis=0, keepdims=True)
+        std[std == 0.0] = 1.0
+        Xtr_np = (Xtr_np - mean) / std
+        Xte_np = (Xte_np - mean) / std
+        if X_val is not None:
+            Xva_np = (Xva_np - mean) / std
+
+    # Tensors
+    Xtr = torch.from_numpy(Xtr_np)
+    Xte = torch.from_numpy(Xte_np)
+    ytr = torch.from_numpy(np.asarray(y_train, dtype=np.float32)).view(-1)
+    yte = torch.from_numpy(np.asarray(y_test, dtype=np.float32)).view(-1)
+
     if X_val is not None and y_val is not None:
-        Xva = torch.tensor(X_val, dtype=torch.float32)
-        yva = torch.tensor(y_val, dtype=torch.float32)
+        Xva = torch.from_numpy(Xva_np)
+        yva = torch.from_numpy(np.asarray(y_val, dtype=np.float32)).view(-1)
     else:
-        Xva = Xte
-        yva = yte
+        # fallback: use test as validation (not ideal, but keeps function robust)
+        Xva, yva = Xte, yte
 
-    # Create custom dataset that returns dictionaries
-    class DictDataset(torch.utils.data.Dataset):
-        def __init__(self, features, targets):
-            self.features = features
-            self.targets = targets
-            
-        def __len__(self):
-            return len(self.features)
-            
-        def __getitem__(self, idx):
-            return {
-                'features': self.features[idx],
-                'target': self.targets[idx]  # Keep as scalar
-            }
+    # DataLoaders
+    pin_mem = use_gpu
+    loader_tr = DataLoader(DictDataset(Xtr, ytr), batch_size=batch_size, shuffle=True,
+                           num_workers=num_workers, pin_memory=pin_mem)
+    loader_va = DataLoader(DictDataset(Xva, yva), batch_size=batch_size, shuffle=False,
+                           num_workers=num_workers, pin_memory=pin_mem)
+    loader_te = DataLoader(DictDataset(Xte, yte), batch_size=batch_size, shuffle=False,
+                           num_workers=num_workers, pin_memory=pin_mem)
 
-    ds_tr = DictDataset(Xtr, ytr)
-    ds_va = DictDataset(Xva, yva)
-    loader_tr = DataLoader(ds_tr, batch_size=batch_size, shuffle=True)
-    loader_va = DataLoader(ds_va, batch_size=batch_size)
-
-    # 2) Modell initialisieren
+    # Model
     model = AdaptiveRidgeLogisticRegression(
-        input_dim = X_train.shape[1],
-        output_dim= 1,
+        input_dim=Xtr.shape[1],
+        output_dim=1,
         learning_rate=learning_rate,
         lasso_penalty=lasso_penalty,
         group_penalty=group_penalty,
         lasso_norm=lasso_norm,
         group_norm=group_norm,
         dropout=dropout,
-        hidden_dim=hidden_dim
+        hidden_dim=hidden_dim,
+        noise_std=noise_std,
     )
 
-    # 3) Trainer konfigurieren
+    callbacks = []
+    if early_stop_patience is not None and EarlyStopping is not None:
+        callbacks.append(EarlyStopping(monitor='val_loss', patience=early_stop_patience, mode='min'))
+
     trainer = L.Trainer(
-        max_epochs = max_epochs,
-        accelerator = device.type,
-        devices = 1 if device.type=="cuda" else 1,  # Use 1 for CPU instead of None
-        enable_checkpointing = False,
-        logger = False,
-        enable_model_summary = False,
+        max_epochs=max_epochs,
+        accelerator='gpu' if use_gpu else 'cpu',
+        devices=1,
+        enable_checkpointing=False,
+        logger=False,
+        enable_model_summary=False,
+        callbacks=callbacks,
     )
 
-    # 4) Training
+    # Train
     trainer.fit(model, train_dataloaders=loader_tr, val_dataloaders=loader_va)
 
-    # 5) Vorhersage auf Testset (separate DataLoader für Test)
-    ds_te = DictDataset(Xte, yte)
-    loader_te = DataLoader(ds_te, batch_size=batch_size)
-    preds = trainer.predict(model, loader_te)  # Liste von 1-D Tensoren
-    probs = torch.cat(preds, dim=0).squeeze().cpu().numpy()
+    # Predict probs on val & test
+    probs_val = torch.cat(trainer.predict(model, loader_va), dim=0).squeeze().cpu().numpy()
+    probs_te  = torch.cat(trainer.predict(model, loader_te), dim=0).squeeze().cpu().numpy()
 
-    # 6) Threshold‑Optimierung (use validation data if available, otherwise test data)
-    thresholds = np.linspace(0.000, 1.000, 1001)
-    if X_val is not None and y_val is not None:
-        # Use validation data for threshold optimization
-        val_preds = trainer.predict(model, loader_va)
-        val_probs = torch.cat(val_preds, dim=0).squeeze().cpu().numpy()
-        f1s = [f1_score(y_val, (val_probs>=t).astype(int)) for t in thresholds]
-    else:
-        # Use test data for threshold optimization (fallback)
-        f1s = [f1_score(y_test, (probs>=t).astype(int)) for t in thresholds]
-    
+    # Threshold selection on validation
+    thresholds = np.linspace(0.0, 1.0, 1001)
+    y_ref = np.asarray(yva.cpu() if torch.is_tensor(yva) else yva, dtype=np.int32)
+    f1s = [f1_score(y_ref, (probs_val >= t).astype(int), zero_division=0) for t in thresholds]
     best_idx = int(np.argmax(f1s))
-    best_thr = thresholds[best_idx]
+    best_thr = float(thresholds[best_idx])
 
-    # Feature selection based on beta coefficients
-    beta_coeffs = model.beta.data.cpu().numpy()  # Get all beta coefficients
+    # Test metrics at best_thr
+    y_test_np = np.asarray(y_test, dtype=np.int32)
+    y_pred = (probs_te >= best_thr).astype(int)
+    f1 = float(f1_score(y_test_np, y_pred, zero_division=0))
+    acc = float((y_pred == y_test_np).mean())
+
+    # Final feature selection from beta
+    beta_coeffs = model.beta.detach().cpu().numpy()
     beta_threshold = 0.01
-    if X_columns is not None:
-        selected_features = [X_columns[i] for i, beta in enumerate(beta_coeffs) if abs(beta) > beta_threshold]
+    if X_columns is not None and len(X_columns) == model.input_dim:
+        selected_features = [X_columns[i] for i, b in enumerate(beta_coeffs) if abs(b) > beta_threshold]
     else:
-        selected_features = [i for i, beta in enumerate(beta_coeffs) if abs(beta) > beta_threshold]
+        selected_features = [i for i, b in enumerate(beta_coeffs) if abs(b) > beta_threshold]
 
-    # Calculate final metrics on test set
-    y_pred = (probs >= best_thr).astype(int)
-    f1 = float(f1_score(y_test, y_pred, zero_division=0))
-    acc = float((y_pred == y_test).mean())
-    
     result = {
         'model_name': 'nimo_baseline',
         'iteration': iteration,
         'random_seed': randomState,
         'f1': f1,
         'accuracy': acc,
-        'threshold': float(best_thr),
+        'threshold': best_thr,
         'y_pred': y_pred.tolist(),
-        'y_prob': probs.tolist(),
+        'y_prob': probs_te.tolist(),
         'selected_features': selected_features,
         'n_selected': len(selected_features),
         'selection': {
-            'mask': [1 if abs(beta) > beta_threshold else 0 for beta in beta_coeffs],
+            'mask': [1 if abs(b) > beta_threshold else 0 for b in beta_coeffs],
             'features': selected_features
         },
         'hyperparams': {
@@ -385,8 +510,96 @@ def run_nimo_baseline(
             'lasso_norm': float(lasso_norm),
             'group_norm': float(group_norm),
             'dropout': float(dropout),
-            'hidden_dim': hidden_dim
+            'hidden_dim': hidden_dim,
+            'standardize': bool(standardize),
+            'self_features': self_features or [],
+            'noise_std': float(noise_std),
         }
     }
-    
-    return standardize_method_output(result) 
+    return standardize_method_output(result)
+
+
+# -------------------- Grid Search Wrapper --------------------
+
+def run_nimo_grid(
+    X_train, y_train, X_test, y_test,
+    *,
+    X_val=None, y_val=None,
+    iteration: int = 0,
+    randomState: int = 42,
+    X_columns: Optional[List[str]] = None,
+    grid: Optional[Dict[str, List[Any]]] = None,
+    max_epochs: int = 60,
+    batch_size: int = 128,
+    standardize: bool = True,
+    num_workers: int = 0,
+    self_features: Optional[List[str]] = None,   # default enabled below
+    early_stop_patience: Optional[int] = 8,
+    noise_std: float = 0.2,
+) -> Dict[str, Any]:
+    """
+    Fair hyperparameter sweep for NIMO, selecting by validation F1 with threshold search.
+    Returns the best result plus all trials.
+    Notes:
+      - Self-features default: ["x2","sin","tanh","arctan"]
+    """
+
+    # Default self-features if not specified
+    if self_features is None:
+        self_features = ["x2", "sin", "tanh", "arctan"]
+
+    # Default grid aligned with LassoNet-style path breadth
+    if grid is None:
+        grid = {
+            "learning_rate": [1e-3, 3e-4],
+            "group_penalty": [0.1, 0.3, 1.0, 3.0],
+            "lasso_penalty": [1e-4, 1e-3, 1e-2, 5e-2],
+            "dropout": [0.0, 0.2, 0.5],
+            "hidden_dim": [64, 128, 256],
+        }
+
+    keys = list(grid.keys())
+    combos = list(itertools.product(*[grid[k] for k in keys]))
+
+    trials: List[Dict[str, Any]] = []
+    best: Optional[Dict[str, Any]] = None
+
+    for ci, values in enumerate(combos, 1):
+        h = dict(zip(keys, values))
+        print(f"[NIMO grid] Trial {ci}/{len(combos)} -> {h}")
+
+        res = run_nimo_baseline(
+            X_train, y_train, X_test, y_test,
+            iteration=iteration, randomState=randomState,
+            X_columns=X_columns,
+            X_val=X_val, y_val=y_val,
+            max_epochs=max_epochs,
+            batch_size=batch_size,
+            learning_rate=h.get("learning_rate", 3e-4),
+            lasso_penalty=h.get("lasso_penalty", 1e-2),
+            group_penalty=h.get("group_penalty", 1.0),
+            dropout=h.get("dropout", 0.0),
+            hidden_dim=h.get("hidden_dim", None),
+            standardize=standardize,
+            num_workers=num_workers,
+            self_features=self_features,         # default enabled
+            early_stop_patience=early_stop_patience,
+            noise_std=noise_std,
+        )
+
+        res['trial_hparams'] = h
+        trials.append(res)
+
+        if (best is None) or (res['f1'] > best['f1']):
+            best = res
+
+    assert best is not None
+
+    out = {
+        "best": best,
+        "trials": trials,
+        "n_trials": len(trials),
+        "grid": grid,
+        "note": "Best chosen by validation F1 with threshold optimization; test metrics reported for that threshold."
+    }
+    return standardize_method_output(out)
