@@ -79,7 +79,7 @@ def run_random_forest(X_train, y_train, X_test, y_test, iteration, randomState, 
         if X_columns is not None else []
 
     result = {
-        "model_name": "random_forest",
+        "model_name": "RF",
         "iteration": iteration,
         "random_seed": randomState,
         "f1": f1,

@@ -20,7 +20,7 @@ from sampling import stratified_with_replacement, rebalance_train_indices, get_c
 # Import methods
 from methods.lasso import run_lasso
 from methods.lasso_Net import run_lassonet
-from methods.nimo_variants import run_nimo, run_nimo_baseline
+from methods.nimo_variants import run_nimo, run_nimo_baseline, run_nimo_transformer
 from methods.random_forest import run_random_forest
 from methods.neural_net import run_neural_net
 
@@ -102,13 +102,7 @@ def get_all_datasets():
     return all_datasets
 
 
-NIMO_MODE = os.getenv("NIMO_MODE", "transformer").lower()
-if NIMO_MODE == "baseline":
-    ACTIVE_NIMO_RUNNER = run_nimo_baseline
-    ACTIVE_NIMO_NAME = "nimo_baseline"
-else:
-    ACTIVE_NIMO_RUNNER = run_nimo
-    ACTIVE_NIMO_NAME = "nimo_transformer"
+# NIMO variants are now included explicitly in the methods list below
 
 
 def run_all_methods(X_tr, y_tr, X_va, y_va, X_te, y_te, seed, feature_names, dataset_info=None):
@@ -127,12 +121,13 @@ def run_all_methods(X_tr, y_tr, X_va, y_va, X_te, y_te, seed, feature_names, dat
         list: Results from all methods
     """
     methods = [
-        ("lasso", run_lasso),
-        ("lassonet", run_lassonet),
-        (ACTIVE_NIMO_NAME, ACTIVE_NIMO_RUNNER),
-        ("random_forest", run_random_forest),
-        ("nimo_baseline", run_nimo_baseline),
-        ("neural_net", run_neural_net),
+        ("Lasso", run_lasso),
+        ("LassoNet", run_lassonet),
+        #("nimo_transformer", run_nimo),
+        ("NIMO", run_nimo_transformer),
+        ("RF", run_random_forest),
+        #("nimo_baseline", run_nimo_baseline),
+        ("NN", run_neural_net),
         # ("sparse_neural_net", run_sparse_neural_net),
         # ("sparse_linear_baseline", run_sparse_linear_baseline)
     ]
@@ -203,7 +198,7 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/all"):
     print(f"Datasets: {len(all_datasets)}")
     print(f"Iterations per dataset: {n_iterations}")
     print(f"Rebalancing: {rebalance_config}")
-    print(f"Active NIMO variant: {ACTIVE_NIMO_NAME}")
+    print(f"NIMO variants: nimo_transformer (updated), nimo_transformer_old (original)")
     print(f"Output directory: {output_dir}")
     print()
 
@@ -262,12 +257,19 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/all"):
             if entry["kind"] == "synthetic":
                 true_support = meta.get("true_support", [])
                 beta_nonzero = meta.get("beta_nonzero", {})
-                # Convert beta_nonzero dict to list in the correct order
-                beta_true = [beta_nonzero.get(str(i), 0.0) for i in range(len(true_support))]
+                n_features = meta.get("p", len(true_support))
+                
+                # Create full-length beta_true vector
+                beta_true_full = [0.0] * n_features
+                for idx, val in beta_nonzero.items():
+                    if 0 <= int(idx) < n_features:
+                        beta_true_full[int(idx)] = float(val)
+                
                 dataset_info.update({
                     "n_true_features": len(true_support),
                     "true_support": json.dumps(true_support),
-                    "beta_true": json.dumps(beta_true)
+                    "beta_true": json.dumps(beta_true_full),
+                    "b0_true": meta.get("b0", 0.0)
                 })
             else:
                 # For real datasets, add empty true support info for plotting compatibility
@@ -387,4 +389,4 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/all"):
 
 if __name__ == "__main__":
     # Run with default settings
-    df = main(n_iterations=20)  # Start with 3 iterations for testing
+    df = main(n_iterations=10)  # Start with 3 iterations for testing

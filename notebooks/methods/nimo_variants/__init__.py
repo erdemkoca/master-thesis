@@ -12,5 +12,6 @@ Available variants:
 from .baseline import run_nimo_baseline
 from .variant import run_nimo_variant
 from .nimo import run_nimo
+from .nimoTransformer_NN import run_nimo as run_nimo_transformer
 
-__all__ = ['run_nimo_baseline', 'run_nimo_variant', 'run_nimo'] 
+__all__ = ['run_nimo_baseline', 'run_nimo_variant', 'run_nimo', 'run_nimo_transformer'] 

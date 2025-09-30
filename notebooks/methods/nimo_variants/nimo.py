@@ -41,7 +41,7 @@ def _binary_code(index: int, n_bits: int) -> np.ndarray:
 
 
 class TransformerCorrection(nn.Module):
-    """Transformer encoder that yields per-feature corrections and a residual logit."""
+    """Transformer encoder that yields per-feature corrections using masked attention."""
 
     def __init__(
         self,
@@ -80,45 +80,62 @@ class TransformerCorrection(nn.Module):
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-
+        # Per-feature correction head
         self.corr_head = nn.Sequential(
             nn.LayerNorm(embed_dim),
             nn.Linear(embed_dim, embed_dim),
             nn.GELU(),
             nn.Linear(embed_dim, 1),
         )
-        self.residual_head = nn.Sequential(
-            nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, embed_dim),
-            nn.GELU(),
-            nn.Linear(embed_dim, 1),
-        )
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Return (corrections, residual) before scaling."""
-        tokens = self.value_proj(x.unsqueeze(-1))
-        tokens = tokens + self.feature_embed.unsqueeze(0)
-
+    def _tokens(self, x: torch.Tensor) -> torch.Tensor:
+        """Return (B, d, E) token sequence (no CLS)."""
+        tokens = self.value_proj(x.unsqueeze(-1)) + self.feature_embed.unsqueeze(0)
         if self.use_binary_context and self.binary_proj is not None:
-            codes = self.binary_proj(self.binary_codes).unsqueeze(0)
-            tokens = tokens + codes
+            tokens = tokens + self.binary_proj(self.binary_codes).unsqueeze(0)
+        return tokens  # (B, d, E)
 
-        batch_size = x.size(0)
-        cls = self.cls_token.expand(batch_size, -1, -1)
-        tokens = torch.cat([cls, tokens], dim=1)
+    def corrections_masked(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Compute g_j using a per-j attention mask that blocks any attention to key j.
+        Ensures g_j = g_j(x_{-j}) at ALL layers.
+        """
+        B, d = x.size(0), self.d
+        tokens = self._tokens(x)                      # (B, d, E)
+        g = x.new_zeros(B, d)
 
-        encoded = self.encoder(tokens)
-        cls_encoded = encoded[:, 0]
-        feature_encoded = encoded[:, 1:]
+        # Use additive mask with -inf on blocked positions (PyTorch supports float masks)
+        # Shape must be (L, L) where L=d (since batch_first=True).
+        for j in range(d):
+            attn_mask = torch.zeros(d, d, device=x.device)
+            attn_mask[:, j] = float("-inf")          # block all queries attending to key j
+            # Optional: block self-attention too → attn_mask[torch.arange(d), torch.arange(d)] = float("-inf")
 
-        corr = torch.tanh(self.corr_head(feature_encoded).squeeze(-1))
-        residual = torch.tanh(self.residual_head(cls_encoded)).squeeze(-1)
-        return corr, residual
+            enc = self.encoder(tokens, mask=attn_mask)   # (B, d, E)
+            # Others-only pooling (mean over features except j)
+            sum_all = enc.sum(dim=1, keepdim=True)       # (B, 1, E)
+            others_sum = sum_all - enc[:, j:j+1, :]      # (B, 1, E)
+            others_mean = others_sum / max(1, d - 1)     # (B, 1, E)
+            g[:, j] = torch.tanh(self.corr_head(others_mean.squeeze(1)).squeeze(-1))
+        return g  # (B, d)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return per-feature corrections g (B, d) using masked encoder."""
+        return self.corrections_masked(x)
 
 
 class NIMOTransformer(nn.Module):
-    """Hybrid model with sparse β and transformer-based corrections."""
+    """Strict NIMO model with sparse β and transformer-based corrections.
+    
+    Implements the canonical NIMO formulation:
+    η(x) = β₀ + Σⱼ βⱼxⱼ + Σⱼ βⱼxⱼgⱼ(x₋ⱼ)
+    
+    Key features:
+    - Masked attention: gⱼ depends only on x₋ⱼ (strict no-self)
+    - β-weighted interaction: corrections are multiplied by βⱼ
+    - gⱼ(0) = 0 regularizer: drives corrections to zero at baseline
+    - No residual terms: pure NIMO formulation
+    """
 
     def __init__(
         self,
@@ -129,14 +146,12 @@ class NIMOTransformer(nn.Module):
         num_layers: int = 2,
         dropout: float = 0.1,
         out_scale: float = 0.4,
-        residual_scale: float = 0.3,
         use_binary_context: bool = True,
     ) -> None:
         super().__init__()
         self.d = d
-        self.beta = nn.Parameter(torch.zeros(d + 1))  # [b0, b_1..b_d]
+        self.beta = nn.Parameter(torch.zeros(d + 1))  # [b0, b1..bd]
         self.out_scale = out_scale
-        self.residual_scale = residual_scale
         self.correction_net = TransformerCorrection(
             d,
             embed_dim=embed_dim,
@@ -145,46 +160,28 @@ class NIMOTransformer(nn.Module):
             dropout=dropout,
             use_binary_context=use_binary_context,
         )
-        self.residual_mlp = nn.Sequential(
-            nn.Linear(d, embed_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(embed_dim, 1),
-        )
-
-    def _raw_modulation(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        corr_raw, residual_raw = self.correction_net(x)
-        corr = self.out_scale * corr_raw
-        residual = self.residual_scale * residual_raw
-        return corr, residual
-
-    def modulation(self, x: torch.Tensor, *, detach: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
-        corr, residual = self._raw_modulation(x)
-        if detach:
-            corr = corr.detach()
-            residual = residual.detach()
-        corr = corr - corr.mean(dim=0, keepdim=True)
-        return corr, residual
 
     def corrections(self, x: torch.Tensor, *, detach: bool = False) -> torch.Tensor:
-        corr, _ = self.modulation(x, detach=detach)
-        return corr
-
-    def _build_features(self, x: torch.Tensor, use_correction: bool) -> Tuple[torch.Tensor, torch.Tensor]:
-        feats = x
-        if use_correction:
-            corr, residual = self.modulation(x)
-            residual = residual + torch.sum(x * corr, dim=1)
-            residual = residual + self.residual_mlp(x).squeeze(-1)
-        else:
-            residual = torch.zeros(x.size(0), device=x.device, dtype=x.dtype)
-        return feats, residual
+        g_raw = self.correction_net(x)                # (B, d)
+        g = self.out_scale * g_raw
+        # Batch-center to encourage E[g]=0
+        g = g - g.mean(dim=0, keepdim=True)
+        if detach:
+            g = g.detach()
+        return g
 
     def predict_logits(self, x: torch.Tensor, use_correction: bool = True) -> torch.Tensor:
-        feats, residual = self._build_features(x, use_correction)
         ones = torch.ones(x.size(0), 1, device=x.device, dtype=x.dtype)
-        B = torch.cat([ones, feats], dim=1)
-        return B.matmul(self.beta) + residual
+        B = torch.cat([ones, x], dim=1)               # (B, d+1)
+        eta_lin = B.matmul(self.beta)                 # β0 + Σ βj xj
+
+        if not use_correction:
+            return eta_lin
+
+        g = self.corrections(x)                       # (B, d)
+        beta_det = self.beta[1:].detach().unsqueeze(0) # (1, d)
+        eta_corr = (x * g * beta_det).sum(dim=1)      # Σ βj xj g_j(x_{-j})
+        return eta_lin + eta_corr
 
     def predict_proba(self, x: torch.Tensor, use_correction: bool = True) -> torch.Tensor:
         return torch.sigmoid(self.predict_logits(x, use_correction=use_correction))
@@ -203,26 +200,33 @@ def update_beta_irls(
 ) -> None:
     """Single IRLS step with elastic net style penalties and trust region."""
     beta_prev = model.beta.detach().clone()
-
-    feats, residual = model._build_features(X, use_correction)
     ones = torch.ones(X.size(0), 1, device=X.device, dtype=X.dtype)
-    B = torch.cat([ones, feats], dim=1)
-    logits = B.matmul(model.beta) + residual
-    p = torch.sigmoid(logits)
-    W = p * (1.0 - p) + eps
-    z = logits + (y - p) / W
+    B = torch.cat([ones, X], dim=1)
 
-    target = z - residual
+    logits_full = model.predict_logits(X, use_correction=use_correction)
+    p = torch.sigmoid(logits_full)
+    W = p * (1 - p) + eps
+    z = logits_full + (y - p) / W
+
+    # Subtract the nonlinear correction part from the target so the linear solve fits β on the "linearized" target.
+    if use_correction:
+        logits_lin = model.predict_logits(X, use_correction=False)
+        nonlinear = logits_full - logits_lin          # = Σ βj xj g_j
+        target = z - nonlinear
+    else:
+        target = z
 
     BW = B * W.unsqueeze(1)
     A = BW.t().matmul(B) + lam_l2 * torch.eye(B.shape[1], device=B.device, dtype=B.dtype)
     bvec = BW.t().matmul(target)
     beta_new = torch.linalg.solve(A, bvec)
 
+    # soft-threshold β (lasso)
     beta_np = beta_new.detach().cpu().numpy()
     beta_np[1:] = np.sign(beta_np[1:]) * np.maximum(np.abs(beta_np[1:]) - tau_l1, 0.0)
-
     beta_tensor = torch.from_numpy(beta_np).to(B.device, dtype=B.dtype)
+
+    # trust region
     delta = beta_tensor - beta_prev
     delta_norm = torch.norm(delta)
     if delta_norm > trust_region:
@@ -238,12 +242,10 @@ class TrainingConfig:
     num_layers: int = 2
     dropout: float = 0.1
     out_scale: float = 0.4
-    residual_scale: float = 0.3
     lam_l2: float = 5e-2
     tau_l1: float = 5e-3
     lam_g: float = 2e-2
     lam_align: float = 1e-3
-    lam_residual: float = 5e-4
     lr: float = 1e-3
     weight_decay: float = 1e-4
     T: int = 25
@@ -254,6 +256,7 @@ class TrainingConfig:
     eps_g: float = 1e-3
     tau_beta_report: float = 0.0
     trust_region: float = 0.5
+    lam_g0: float = 1e-3  # Weight for g_j(0) = 0 regularizer
 
 
 def _default_config_grid(d: int) -> List[Tuple[str, TrainingConfig]]:
@@ -266,11 +269,9 @@ def _default_config_grid(d: int) -> List[Tuple[str, TrainingConfig]]:
         num_heads=4,
         dropout=0.1,
         out_scale=0.45,
-        residual_scale=0.4,
         lam_l2=2e-2,
         lam_g=1e-2,
         lam_align=5e-4,
-        lam_residual=5e-4,
         lr=5e-4,
         weight_decay=5e-5,
         T=40,
@@ -288,11 +289,9 @@ def _default_config_grid(d: int) -> List[Tuple[str, TrainingConfig]]:
         num_heads=aggressive_heads,
         dropout=0.15,
         out_scale=0.55,
-        residual_scale=0.5,
         lam_l2=1e-2,
         lam_g=5e-3,
         lam_align=5e-4,
-        lam_residual=1e-3,
         lr=3e-4,
         weight_decay=5e-5,
         T=60,
@@ -310,11 +309,9 @@ def _default_config_grid(d: int) -> List[Tuple[str, TrainingConfig]]:
         num_heads=residual_heads,
         dropout=0.2,
         out_scale=0.5,
-        residual_scale=0.6,
         lam_l2=1.5e-2,
         lam_g=7e-3,
         lam_align=5e-4,
-        lam_residual=1e-3,
         lr=4e-4,
         weight_decay=5e-5,
         T=50,
@@ -337,11 +334,9 @@ def _default_config_grid(d: int) -> List[Tuple[str, TrainingConfig]]:
             num_heads=3,
             dropout=0.05,
             out_scale=0.7,
-            residual_scale=0.65,
             lam_l2=1e-2,
             lam_g=2e-3,
             lam_align=3e-4,
-            lam_residual=5e-4,
             lr=4e-4,
             weight_decay=5e-5,
             T=60,
@@ -397,12 +392,11 @@ def _train_single(
         num_layers=cfg.num_layers,
         dropout=cfg.dropout,
         out_scale=cfg.out_scale,
-        residual_scale=cfg.residual_scale,
         use_binary_context=cfg.use_binary_context,
     ).to(device)
 
     opt = torch.optim.Adam(
-        list(model.correction_net.parameters()) + list(model.residual_mlp.parameters()),
+        model.correction_net.parameters(),
         lr=cfg.lr,
         weight_decay=cfg.weight_decay,
     )
@@ -420,7 +414,7 @@ def _train_single(
 
     loss_history = []
     best_val_loss = float("inf")
-    best_state: Optional[Tuple[dict, dict, torch.Tensor]] = None
+    best_state: Optional[Tuple[dict, torch.Tensor]] = None
     stopped_early = False
 
     for t in range(cfg.T):
@@ -447,13 +441,15 @@ def _train_single(
                 g_corr = model.corrections(Xt)
             reg_g = lam_g_curr * g_corr.abs().mean()
             align = cfg.lam_align * torch.mean(torch.abs((Xt * g_corr).mean(dim=0)))
-            residual_out = model.residual_mlp(Xt).squeeze(-1)
-            reg_residual = cfg.lam_residual * residual_out.abs().mean()
 
-            loss = bce + reg_g + align + reg_residual
+            # g_j(0) regularizer: evaluate on zeros (standardized)
+            zeros_like = torch.zeros_like(Xt)
+            g_at_zero = model.correction_net.corrections_masked(zeros_like)
+            reg_g0 = cfg.lam_g0 * g_at_zero.abs().mean()
+
+            loss = bce + reg_g + align + reg_g0
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.correction_net.parameters(), max_norm=1.0)
-            torch.nn.utils.clip_grad_norm_(model.residual_mlp.parameters(), max_norm=1.0)
             opt.step()
 
         loss_history.append(float(loss.item()))
@@ -469,14 +465,12 @@ def _train_single(
                 best_val_loss = val_loss
                 best_state = (
                     model.correction_net.state_dict(),
-                    model.residual_mlp.state_dict(),
                     model.beta.detach().clone(),
                 )
 
     if best_state is not None:
-        correction_state, residual_mlp_state, beta_state = best_state
+        correction_state, beta_state = best_state
         model.correction_net.load_state_dict(correction_state)
-        model.residual_mlp.load_state_dict(residual_mlp_state)
         model.beta.data.copy_(beta_state)
 
     model.eval()
@@ -543,15 +537,11 @@ def _train_single(
     if X_val is not None:
         with torch.no_grad():
             g_corr_val = model.corrections(torch.tensor(Xva, dtype=torch.float32, device=device)).cpu().numpy()
-            residual_val = model.residual_mlp(
-                torch.tensor(Xva, dtype=torch.float32, device=device)
-            ).squeeze(-1).cpu().numpy()
         corr_stats = {
             "eps_g": float(cfg.eps_g),
             "mean_abs_corr": np.abs(g_corr_val).mean(axis=0).tolist(),
             "activation_rate": (np.abs(g_corr_val) > cfg.eps_g).mean(axis=0).tolist(),
             "rel_mod": np.mean(np.abs(Xva * g_corr_val), axis=0).tolist(),
-            "residual_mean_abs": float(np.mean(np.abs(residual_val))),
         }
     else:
         g_corr_val = None
@@ -580,6 +570,7 @@ def _train_single(
         g_corr_train = model.corrections(
             torch.tensor(Xtr, dtype=torch.float32, device=device), detach=True
         ).cpu().numpy()
+    # Effective coefficients: β_j * (1 + mean(g_j)) where g_j is β-weighted interaction
     beta_eff_raw = beta_raw * (1.0 + g_corr_train.mean(axis=0))
 
     feature_names = list(X_columns) if X_columns is not None else [f"feature_{i}" for i in range(len(beta_raw))]

@@ -585,7 +585,7 @@ def _train_single(
     feature_names = list(X_columns) if X_columns is not None else [f"feature_{i}" for i in range(len(beta_raw))]
 
     result = {
-        "model_name": "nimo_transformer",
+        "model_name": "NIMO",
         "iteration": iteration,
         "random_seed": randomState,
         "f1": f1,

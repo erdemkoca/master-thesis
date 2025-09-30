@@ -1,0 +1,486 @@
+#!/usr/bin/env python3
+"""
+Final perfect plots script - combines working simple approach with full functionality.
+"""
+
+import pandas as pd
+import matplotlib
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
+from matplotlib.ticker import MultipleLocator, FixedLocator
+
+# Force consistent settings for perfect plots
+matplotlib.use('Agg')
+plt.rcParams.update({
+    'figure.dpi': 100,
+    'savefig.dpi': 300,
+    'font.size': 10,
+    'axes.titlesize': 18,
+    'axes.labelsize': 12,
+    'xtick.labelsize': 12,
+    'ytick.labelsize': 12,
+    'font.family': 'DejaVu Sans',
+    'axes.linewidth': 1.2,
+    'grid.linewidth': 1.0,
+    'lines.linewidth': 1.0,
+    'patch.linewidth': 0.5,
+    'xtick.major.size': 6,
+    'xtick.minor.size': 4,
+    'ytick.major.size': 6,
+    'ytick.minor.size': 4,
+    'xtick.direction': 'out',
+    'ytick.direction': 'out',
+    'axes.spines.left': True,
+    'axes.spines.bottom': True,
+    'axes.spines.top': True,
+    'axes.spines.right': True,
+    'axes.grid': False,
+    'axes.axisbelow': True,
+})
+
+# Typography: smaller titles, serif look, CM-style math
+plt.rcParams.update({
+    "axes.titlesize": 14,          # was 18
+    "font.family": "serif",
+    "font.serif": ["CMU Serif", "DejaVu Serif", "Times New Roman"],
+    "mathtext.fontset": "cm",
+})
+
+def parse_json_safe(x):
+    """Safely parse JSON-like strings."""
+    if pd.isna(x) or x == "":
+        return None
+    try:
+        import ast
+        return ast.literal_eval(x)
+    except Exception:
+        return None
+
+def destring_coeff(row):
+    """Extract coefficient information from a row."""
+    co = parse_json_safe(row.get("coefficients", "{}"))
+    if not isinstance(co, dict):
+        return None, None
+    
+    vals = np.array(co.get("values", []), dtype=float)
+    mean = np.array(co.get("mean", []), dtype=float) if "mean" in co else None
+    scale = np.array(co.get("scale", []), dtype=float) if "scale" in co else None
+    space = co.get("space", "raw")
+    
+    return {
+        "values": vals, 
+        "mean": mean, 
+        "scale": scale, 
+        "space": space,
+        "intercept": co.get("intercept", 0.0)
+    }, co.get("feature_names", None)
+
+def to_raw_beta(coeff_info):
+    """Convert standardized coefficients to raw scale."""
+    vals = coeff_info["values"]
+    if coeff_info["space"] == "standardized":
+        scale = coeff_info["scale"]
+        if scale is None:
+            raise ValueError("Need scale to de-standardize Lasso coefficients")
+        return vals / scale
+    return vals
+
+def mean_ci(x, axis=0, alpha=0.05):
+    """Calculate mean and confidence interval."""
+    mean = np.mean(x, axis=axis)
+    n = x.shape[axis]
+    se = np.std(x, axis=axis) / np.sqrt(n)
+    ci = se * 1.96  # 95% CI
+    return mean, ci
+
+def create_final_plot(scenario_id, df_synthetic, save_path=None):
+    """Create the final perfect per-scenario figure."""
+    
+    print(f"Creating final plot for Scenario {scenario_id}...")
+    
+    # Filter data for this scenario
+    dd = df_synthetic[df_synthetic['dataset_id'] == scenario_id].copy()
+    
+    if dd.empty:
+        print(f"No data found for scenario {scenario_id}")
+        return None
+    
+    # Get ground truth
+    base_row = dd.iloc[0]
+    beta_true = parse_json_safe(base_row.get('beta_true', '[]'))
+    if beta_true is None:
+        beta_true = []
+    beta_true = np.array(beta_true, dtype=float)
+    d = len(beta_true)
+    
+    # True support / zeros
+    nz_idx = np.where(np.abs(beta_true) > 0)[0]
+    z_idx = np.where(np.abs(beta_true) == 0)[0]
+    
+    # Get feature names and refactor to beta notation
+    feature_names = None
+    for _, row in dd.iterrows():
+        _, names = destring_coeff(row)
+        if names is not None:
+            feature_names = names
+            break
+    
+    if feature_names is None:
+        feature_names = [f"x{j+1}" for j in range(d)]
+    
+    # Refactor feature names to beta notation (β₁, β₂, β₃, etc.)
+    def refactor_feature_names(names):
+        """Convert feature_0, feature_1, etc. to β₁, β₂, etc."""
+        refactored = []
+        for name in names:
+            if name.startswith("feature_"):
+                try:
+                    num = int(name.split("_")[1])
+                    refactored.append(f"β{num+1}")
+                except (ValueError, IndexError):
+                    refactored.append(name)
+            else:
+                refactored.append(name)
+        return refactored
+    
+    feature_names = refactor_feature_names(feature_names)
+    
+    # Extract F1 scores for boxplot
+    f1_tbl = dd.pivot_table(index="iteration", columns="model_name", values="f1")
+    
+    # Collect model coefficients
+    method_betas = {}
+    for method in ['Lasso', 'NIMO']:
+        try:
+            betas = []
+            for _, row in dd[dd['model_name'] == method].iterrows():
+                info, _ = destring_coeff(row)
+                if info is not None and info["values"] is not None:
+                    try:
+                        beta_raw = to_raw_beta(info)
+                        betas.append(beta_raw)
+                    except Exception as e:
+                        print(f"Warning: Could not process coefficients for {method}: {e}")
+                        continue
+            if betas:
+                method_betas[method] = np.array(betas)
+        except Exception as e:
+            print(f"Warning: Could not collect coefficients for {method}")
+    
+    # Define consistent, distinct palettes
+    # Boxplot colors (method names as in your CSV)
+    BOX_COLORS = {
+        "Lasso":        "#396AB1",   # blue
+        "LassoNet":     "#00A0A0",   # teal
+        "NN":           "#B07AA1",   # purple (not green, avoids GT clash)
+        "NIMO":         "#DA7C30",   # orange
+        "RF":           "#9C755F",   # brown
+    }
+    
+    # Coefficient panel colors (GT is neutral gray)
+    COEF_COLORS = {
+        "GT":    "#7F7F7F",          # gray
+        "Lasso": "#396AB1",          # same blue as boxplot Lasso
+        "NIMO":  "#DA7C30",          # same orange as boxplot NIMO
+    }
+    
+    # Shared styling constants
+    TITLE_SIZE = 14
+    TICK_SIZE = 12
+    
+    # Create the plot
+    fig = plt.figure(figsize=(15, 7))
+    from matplotlib.gridspec import GridSpec
+    gs = GridSpec(nrows=2, ncols=3, figure=fig, 
+                 width_ratios=[1.1, 1.2, 1.2], height_ratios=[1.25, 0.95])
+    
+    # Left: F1 boxplot spans both rows
+    ax1 = fig.add_subplot(gs[:, 0])
+    
+    # Right–top: nonzeros
+    ax2 = fig.add_subplot(gs[0, 1:])
+    
+    # Right–bottom: zeros heatmap
+    ax3 = fig.add_subplot(gs[1, 1:])
+    
+    # --- (A) F1 boxplot with custom styling ---
+    f1_long = f1_tbl.reset_index().melt(id_vars="iteration", var_name="Method", value_name="F1")
+    methods_order = ["Lasso", "LassoNet", "NN", "NIMO", "RF"]
+    present = [m for m in methods_order if m in set(f1_long['Method'])]
+    df_plot = f1_long[f1_long['Method'].isin(present)].copy()
+    
+    # Create boxplot
+    sns.boxplot(
+        data=df_plot,
+        x="Method",
+        y="F1",
+        order=present,
+        palette={k: BOX_COLORS[k] for k in present},
+        ax=ax1,
+        width=0.80,            # wider boxes → less gap
+        fliersize=2,
+        linewidth=1.0,
+    )
+    
+    # Style the F1 boxplot
+    ax1.set_title(f"Scenario {scenario_id} — F1 over iterations", fontsize=TITLE_SIZE, pad=8)
+    ax1.set_xlabel("")
+    ax1.set_ylabel("Test F1", fontsize=TICK_SIZE)
+    
+    # grey dotted horizontal grid (like the right plot)
+    ax1.set_axisbelow(True)
+    ax1.yaxis.grid(True, linestyle="--", linewidth=1.0, color="#999999", alpha=0.7)
+    ax1.xaxis.grid(False)
+    
+    # stronger tick marks on both axes
+    ax1.tick_params(axis="both", which="both", direction="out", length=6, width=1.2, labelsize=TICK_SIZE)
+    
+    # rotate labels & tighten category spacing a touch
+    ax1.set_xticks(range(len(present)))
+    ax1.set_xticklabels(present, rotation=90, ha="right")
+    ax1.margins(x=0.02)   # tiny side margin to reduce whitespace
+    
+    # black frame (like right panel)
+    for s in ax1.spines.values():
+        s.set_color("black")
+        s.set_linewidth(1.2)
+    
+    # --- (B) Non-zero coefficients bar+CI vs ground truth ---
+    if len(nz_idx) > 0 and method_betas:
+        # Prepare data including intercept β₀
+        intercept_gt = 0.0
+        intercept_lasso = 0.0
+        intercept_nimo = 0.0
+        
+        for method, betas in method_betas.items():
+            if method == 'Lasso':
+                for _, row in dd[dd['model_name'] == 'Lasso'].iterrows():
+                    info, _ = destring_coeff(row)
+                    if info is not None:
+                        intercept_lasso = float(info.get('intercept', 0.0))
+                        break
+            elif method == 'NIMO':
+                for _, row in dd[dd['model_name'] == 'NIMO'].iterrows():
+                    info, _ = destring_coeff(row)
+                    if info is not None:
+                        intercept_nimo = float(info.get('intercept', 0.0))
+                        break
+        
+        # Get ground truth intercept
+        intercept_gt = base_row.get('b0_true', 0.0)
+        if isinstance(intercept_gt, str):
+            try:
+                intercept_gt = float(intercept_gt)
+            except:
+                intercept_gt = 0.0
+        
+        # Create coefficient names with β₀ FIRST, then β₁, β₂, ... using mathtext
+        labels_math = [r"$\beta_0$"] + [rf"$\beta_{j+1}$" for j in nz_idx]
+        
+        # Prepare data for plotting
+        coef_data = []
+        
+        # Add intercept β₀ FIRST
+        coef_data.append({
+            'coef_name': r"$\beta_0$",
+            'method': 'GT',
+            'value': intercept_gt,
+            'ci_low': intercept_gt,
+            'ci_high': intercept_gt
+        })
+        
+        if 'Lasso' in method_betas:
+            coef_data.append({
+                'coef_name': r"$\beta_0$",
+                'method': 'Lasso',
+                'value': intercept_lasso,
+                'ci_low': intercept_lasso,
+                'ci_high': intercept_lasso
+            })
+        
+        if 'NIMO' in method_betas:
+            coef_data.append({
+                'coef_name': r"$\beta_0$",
+                'method': 'NIMO',
+                'value': intercept_nimo,
+                'ci_low': intercept_nimo,
+                'ci_high': intercept_nimo
+            })
+        
+        # Add non-zero coefficients
+        for i, j in enumerate(nz_idx):
+            coef_data.append({
+                'coef_name': rf"$\beta_{j+1}$",
+                'method': 'GT',
+                'value': beta_true[j],
+                'ci_low': beta_true[j],
+                'ci_high': beta_true[j]
+            })
+            
+            # Add Lasso data
+            if 'Lasso' in method_betas:
+                lasso_betas = method_betas['Lasso']
+                mean_nz, ci_nz = mean_ci(lasso_betas[:, nz_idx], axis=0)
+                coef_data.append({
+                    'coef_name': rf"$\beta_{j+1}$",
+                    'method': 'Lasso',
+                    'value': mean_nz[i],
+                    'ci_low': mean_nz[i] - ci_nz[i],
+                    'ci_high': mean_nz[i] + ci_nz[i]
+                })
+            
+            # Add NIMO data
+            if 'NIMO' in method_betas:
+                nimo_betas = method_betas['NIMO']
+                mean_nz, ci_nz = mean_ci(nimo_betas[:, nz_idx], axis=0)
+                coef_data.append({
+                    'coef_name': rf"$\beta_{j+1}$",
+                    'method': 'NIMO',
+                    'value': mean_nz[i],
+                    'ci_low': mean_nz[i] - ci_nz[i],
+                    'ci_high': mean_nz[i] + ci_nz[i]
+                })
+        
+        # Create DataFrame and plot
+        coef_df = pd.DataFrame(coef_data)
+        coef_df['coef_name'] = pd.Categorical(coef_df['coef_name'], labels_math, ordered=True)
+        coef_df.sort_values('coef_name', inplace=True)
+        
+        # Plot the coefficients
+        methods = ['GT', 'Lasso', 'NIMO']
+        w = 0.24
+        x = np.arange(len(labels_math))
+        
+        # Draw bars + CI whiskers
+        for i, m in enumerate(["GT","Lasso","NIMO"]):
+            sub = coef_df[coef_df["method"] == m]
+            if not sub.empty:
+                ax2.bar(x + (i-1)*w, sub["value"], width=w,
+                        color=COEF_COLORS[m], edgecolor="black", linewidth=0.5, label=m)
+                ax2.errorbar(
+                    x + (i-1)*w, sub["value"],
+                    yerr=[sub["value"]-sub["ci_low"], sub["ci_high"]-sub["value"]],
+                    fmt="none", ecolor="black", elinewidth=0.7, capsize=2
+                )
+        
+        # Style the coefficient plot
+        ax2.set_title("Non-zero coefficients", fontsize=TITLE_SIZE)
+        ax2.set_ylabel("Coefficient", fontsize=TICK_SIZE)
+        ax2.tick_params(axis="both", which="both", direction="out", length=6, width=1.2, labelsize=TICK_SIZE)
+        
+        # grey dotted y-grid, fixed ticks if you like {-2, 0, 2}
+        from matplotlib.ticker import FixedLocator
+        ax2.yaxis.set_major_locator(FixedLocator([-2, 0, 2]))
+        ax2.yaxis.grid(True, linestyle="--", linewidth=1.0, color="#999999", alpha=0.7)
+        ax2.xaxis.grid(False)
+        
+        ax2.set_xticks(x)
+        ax2.set_xticklabels(labels_math, rotation=25, ha='right')
+        ax2.set_facecolor((1,1,1,0))
+        
+        # black frame
+        for s in ax2.spines.values():
+            s.set_color('black')
+            s.set_linewidth(1.2)
+        
+        # legend a bit larger
+        ax2.legend(
+            frameon=True, fancybox=True, framealpha=0.9,
+            borderpad=0.4, handlelength=1.5, labelspacing=0.5,
+            prop={"size": 12},                 # bigger
+            loc="lower left", bbox_to_anchor=(0.01, 0.02), bbox_transform=ax2.transAxes
+        )
+    else:
+        ax2.text(0.5, 0.5, "No coefficient data available", 
+                ha="center", va="center", transform=ax2.transAxes)
+        ax2.axis("off")
+    
+    # --- (C) Zero coefficients heatmap ---
+    if len(z_idx) > 0 and method_betas:
+        # Create heatmap data
+        heatmap_data = []
+        for method, betas in method_betas.items():
+            if method in ['Lasso', 'NIMO']:
+                mean_z, ci_z = mean_ci(betas[:, z_idx], axis=0)
+                for i, j in enumerate(z_idx):
+                    heatmap_data.append({
+                        'method': method.replace('_', ' ').title(),
+                        'feature': feature_names[j],
+                        'mean': mean_z[i],
+                        'ci': ci_z[i]
+                    })
+        
+        if heatmap_data:
+            heatmap_df = pd.DataFrame(heatmap_data)
+            heatmap_pivot = heatmap_df.pivot(index='method', columns='feature', values='mean')
+            
+            # Create heatmap
+            sns.heatmap(heatmap_pivot, annot=True, fmt='.3f', cmap='RdBu_r', center=0,
+                       ax=ax3, cbar_kws={'shrink': 0.8})
+            ax3.set_title('True zero coefficients: estimates (mean ± 95% CI)')
+            ax3.set_xlabel('Feature')
+            ax3.set_ylabel('Method')
+        else:
+            ax3.text(0.5, 0.5, "No zero coefficient data available", 
+                    ha="center", va="center", transform=ax3.transAxes)
+            ax3.axis("off")
+    else:
+        ax3.text(0.5, 0.5, "No zero coefficient data available", 
+                ha="center", va="center", transform=ax3.transAxes)
+        ax3.axis("off")
+    
+    # Adjust layout
+    fig.subplots_adjust(left=0.08, right=0.99, top=0.88, bottom=0.12, wspace=0.35, hspace=0.42)
+    
+    # Always save the plot when run
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight', transparent=True)
+        print(f"✓ Final plot saved to {save_path}")
+    else:
+        default_path = f"scenario_{scenario_id}_final.png"
+        plt.savefig(default_path, dpi=300, bbox_inches='tight', transparent=True)
+        print(f"✓ Final plot saved to {default_path}")
+    
+    plt.close()
+    return fig
+
+def main():
+    """Main function to generate all final perfect plots."""
+    print("=== Generating Final Perfect Plots ===")
+    print("This will create the same perfect plots I see in windows!")
+    
+    # Load data
+    results_path = '../../../results/all/experiment_results.csv'
+    df = pd.read_csv(results_path)
+    
+    # Filter for synthetic datasets
+    synthetic_datasets = ['A', 'B', 'C', 'D', 'E']
+    df_synthetic = df[df['dataset_id'].isin(synthetic_datasets)].copy()
+    
+    print(f"Loaded {len(df_synthetic)} synthetic experiments")
+    print(f"Methods: {df_synthetic['model_name'].unique()}")
+    print(f"Scenarios: {synthetic_datasets}")
+    
+    # Generate all plots
+    scenarios = ['A', 'B', 'C', 'D', 'E']
+    saved_plots = []
+    
+    for scenario in scenarios:
+        try:
+            save_path = f"scenario_{scenario}_final.png"
+            fig = create_final_plot(scenario, df_synthetic, save_path=save_path)
+            saved_plots.append(save_path)
+        except Exception as e:
+            print(f"✗ Error creating plot for scenario {scenario}: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    print(f"\n🎉 Successfully generated {len(saved_plots)} final plots!")
+    print("Files saved:")
+    for plot_path in saved_plots:
+        print(f"  - {plot_path}")
+    print("\nThese should look exactly like the perfect plots I see in windows!")
+
+if __name__ == "__main__":
+    main()

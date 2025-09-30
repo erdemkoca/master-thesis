@@ -81,7 +81,7 @@ def run_lasso(
     selected = [name for name, c in zip(X_columns, beta_for_sel) if abs(c) > eps]
 
     return {
-        "model_name": "lasso",
+        "model_name": "Lasso",
         "iteration": iteration,
         "random_seed": randomState,
 

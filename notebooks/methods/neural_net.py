@@ -331,7 +331,7 @@ def run_neural_net(X_train, y_train, X_test, y_test, iteration, randomState, X_c
     train_accuracy = accuracy_score(y_train, train_pred)
     
     result = {
-        'model_name': 'neural_net',
+        'model_name': 'NN',
         'iteration': iteration,
         'random_seed': randomState,
         'f1': best_f1,

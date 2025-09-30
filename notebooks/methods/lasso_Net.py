@@ -114,7 +114,7 @@ def run_lassonet(X_train, y_train, X_test, y_test,
     }
 
     result = {
-        'model_name': 'lassonet',
+        'model_name': 'LassoNet',
         'iteration': iteration,
         'random_seed': randomState,
         
