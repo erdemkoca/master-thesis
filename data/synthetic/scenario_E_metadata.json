@@ -1,0 +1,50 @@
+{
+  "scenario": "E",
+  "desc": "Scenario E: linear x1=+1, x2=-2 with nonlinear interactions (tanh & sin).",
+  "p": 15,
+  "sigma": 0.1,
+  "b0": 1.0,
+  "beta_nonzero": {
+    "0": 1.0,
+    "1": -2.0
+  },
+  "nl": [
+    [
+      "main_int_tanh",
+      0,
+      1,
+      0.0,
+      2.0,
+      1.0
+    ],
+    [
+      "main_int_sin",
+      1,
+      0,
+      0.0,
+      6.0,
+      2.0
+    ],
+    [
+      "main_int_tanh",
+      1,
+      0,
+      0.0,
+      -2.0,
+      2.0
+    ]
+  ],
+  "true_support": [
+    0,
+    1
+  ],
+  "n_full": 10000,
+  "sizes": {
+    "test_big": 5000,
+    "pool": 5000
+  },
+  "class_dist_full": [
+    4420,
+    5580
+  ]
+}

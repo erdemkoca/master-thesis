@@ -99,12 +99,12 @@ def run_all_methods(X_tr, y_tr, X_va, y_va, X_te, y_te, seed, feature_names, dat
     """
     methods = [
         ("Lasso", run_lasso),
-        ("LassoNet", run_lassonet),
+        #("LassoNet", run_lassonet),
         #("nimo_transformer", run_nimo),
         ("NIMO", run_nimo_transformer),
         ("RF", run_random_forest),
         #("nimo_baseline", run_nimo_baseline),
-        ("NN", run_neural_net),
+        #("NN", run_neural_net),
         # ("sparse_neural_net", run_sparse_neural_net),
         # ("sparse_linear_baseline", run_sparse_linear_baseline)
     ]
@@ -358,4 +358,4 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/syntheti
 
 if __name__ == "__main__":
     # Run with default settings
-    df = main(n_iterations=20)  # Start with 1 iteration for testing
+    df = main(n_iterations=2)  # Start with 1 iteration for testing
