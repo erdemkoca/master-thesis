@@ -173,6 +173,10 @@ def create_final_plot(scenario_id, df_synthetic, save_path=None):
         print(f"No data found for scenario {scenario_id}")
         return None
     
+    # Dynamically detect available methods in the data
+    available_methods = sorted(dd['model_name'].unique().tolist())
+    print(f"Available methods for scenario {scenario_id}: {available_methods}")
+    
     # Get ground truth
     base_row = dd.iloc[0]
     beta_true = parse_json_safe(base_row.get('beta_true', '[]'))
@@ -218,7 +222,7 @@ def create_final_plot(scenario_id, df_synthetic, save_path=None):
     
     # Collect model coefficients
     method_betas = {}
-    for method in ['Lasso', 'NIMO']:
+    for method in available_methods:
         try:
             betas = []
             for _, row in dd[dd['model_name'] == method].iterrows():
@@ -233,24 +237,52 @@ def create_final_plot(scenario_id, df_synthetic, save_path=None):
             if betas:
                 method_betas[method] = np.array(betas)
         except Exception as e:
-            print(f"Warning: Could not collect coefficients for {method}")
+            print(f"Warning: Could not collect coefficients for {method}: {e}")
     
     # Define consistent, distinct palettes
     # Boxplot colors (method names as in your CSV)
-    BOX_COLORS = {
-        "Lasso":        "#396AB1",   # blue
-        "LassoNet":     "#00A0A0",   # teal
-        "NN":           "#B07AA1",   # purple (not green, avoids GT clash)
-        "NIMO":         "#DA7C30",   # orange
-        "RF":           "#9C755F",   # brown
+    BOX_COLORS = {}
+    
+    # Add colors for available methods dynamically
+    method_colors = {
+        "Lasso": "#396AB1",          # blue
+        "LassoNet": "#00A0A0",       # teal
+        "NN": "#B07AA1",             # purple
+        "NIMO": "#DA7C30",           # orange
+        "NIMO_T": "#DA7C30",         # orange (same as NIMO)
+        "NIMO_MLP": "#FF6B35",       # red-orange
+        "RF": "#9C755F",             # brown
     }
+    
+    for method in available_methods:
+        if method in method_colors:
+            BOX_COLORS[method] = method_colors[method]
+        else:
+            # Default color for unknown methods
+            BOX_COLORS[method] = "#666666"
     
     # Coefficient panel colors (GT is neutral gray)
     COEF_COLORS = {
         "GT":    "#7F7F7F",          # gray
-        "Lasso": "#396AB1",          # same blue as boxplot Lasso
-        "NIMO":  "#DA7C30",          # same orange as boxplot NIMO
     }
+    
+    # Add colors for available methods dynamically
+    method_colors = {
+        "Lasso": "#396AB1",          # blue
+        "NIMO":  "#DA7C30",          # orange
+        "NIMO_T": "#DA7C30",         # orange (same as NIMO)
+        "NIMO_MLP": "#FF6B35",       # red-orange
+        "RF": "#9C755F",             # brown
+        "NN": "#B07AA1",             # purple
+        "LassoNet": "#00A0A0",       # teal
+    }
+    
+    for method in available_methods:
+        if method in method_colors:
+            COEF_COLORS[method] = method_colors[method]
+        else:
+            # Default color for unknown methods
+            COEF_COLORS[method] = "#666666"
     
     # Shared styling constants
     TITLE_SIZE = 14
@@ -276,8 +308,8 @@ def create_final_plot(scenario_id, df_synthetic, save_path=None):
     
     # --- (A) F1 boxplot with custom styling ---
     f1_long = f1_tbl.reset_index().melt(id_vars="iteration", var_name="Method", value_name="F1")
-    methods_order = ["Lasso", "LassoNet", "NN", "NIMO", "RF"]
-    present = [m for m in methods_order if m in set(f1_long['Method'])]
+    # Use dynamically detected methods instead of hardcoded list
+    present = available_methods
     df_plot = f1_long[f1_long['Method'].isin(present)].copy()
     
     # Create standard boxplot with visible outliers
@@ -295,25 +327,6 @@ def create_final_plot(scenario_id, df_synthetic, save_path=None):
     
     # --- (B) Non-zero coefficients bar+CI vs ground truth ---
     if len(nz_idx) > 0 and method_betas:
-        # Prepare data including intercept β₀
-        intercept_gt = 0.0
-        intercept_lasso = 0.0
-        intercept_nimo = 0.0
-        
-        for method, betas in method_betas.items():
-            if method == 'Lasso':
-                for _, row in dd[dd['model_name'] == 'Lasso'].iterrows():
-                    info, _ = destring_coeff(row)
-                    if info is not None:
-                        intercept_lasso = float(info.get('intercept', 0.0))
-                        break
-            elif method == 'NIMO':
-                for _, row in dd[dd['model_name'] == 'NIMO'].iterrows():
-                    info, _ = destring_coeff(row)
-                    if info is not None:
-                        intercept_nimo = float(info.get('intercept', 0.0))
-                        break
-        
         # Get ground truth intercept
         intercept_gt = base_row.get('b0_true', 0.0)
         if isinstance(intercept_gt, str):
@@ -337,23 +350,24 @@ def create_final_plot(scenario_id, df_synthetic, save_path=None):
             'ci_high': intercept_gt
         })
         
-        if 'Lasso' in method_betas:
-            coef_data.append({
-                'coef_name': r"$\beta_0$",
-                'method': 'Lasso',
-                'value': intercept_lasso,
-                'ci_low': intercept_lasso,
-                'ci_high': intercept_lasso
-            })
-        
-        if 'NIMO' in method_betas:
-            coef_data.append({
-                'coef_name': r"$\beta_0$",
-                'method': 'NIMO',
-                'value': intercept_nimo,
-                'ci_low': intercept_nimo,
-                'ci_high': intercept_nimo
-            })
+        # Add intercept data for each available method
+        for method in available_methods:
+            if method in method_betas:
+                # Get intercept for this method
+                intercept_value = 0.0
+                for _, row in dd[dd['model_name'] == method].iterrows():
+                    info, _ = destring_coeff(row)
+                    if info is not None:
+                        intercept_value = float(info.get('intercept', 0.0))
+                        break
+                
+                coef_data.append({
+                    'coef_name': r"$\beta_0$",
+                    'method': method,
+                    'value': intercept_value,
+                    'ci_low': intercept_value,
+                    'ci_high': intercept_value
+                })
         
         # Add non-zero coefficients
         for i, j in enumerate(nz_idx):
@@ -365,29 +379,18 @@ def create_final_plot(scenario_id, df_synthetic, save_path=None):
                 'ci_high': beta_true[j]
             })
             
-            # Add Lasso data
-            if 'Lasso' in method_betas:
-                lasso_betas = method_betas['Lasso']
-                mean_nz, ci_nz = mean_ci(lasso_betas[:, nz_idx], axis=0)
-                coef_data.append({
-                    'coef_name': rf"$\beta_{j+1}$",
-                    'method': 'Lasso',
-                    'value': mean_nz[i],
-                    'ci_low': mean_nz[i] - ci_nz[i],
-                    'ci_high': mean_nz[i] + ci_nz[i]
-                })
-            
-            # Add NIMO data
-            if 'NIMO' in method_betas:
-                nimo_betas = method_betas['NIMO']
-                mean_nz, ci_nz = mean_ci(nimo_betas[:, nz_idx], axis=0)
-                coef_data.append({
-                    'coef_name': rf"$\beta_{j+1}$",
-                    'method': 'NIMO',
-                    'value': mean_nz[i],
-                    'ci_low': mean_nz[i] - ci_nz[i],
-                    'ci_high': mean_nz[i] + ci_nz[i]
-                })
+            # Add data for each available method
+            for method in available_methods:
+                if method in method_betas:
+                    method_betas_array = method_betas[method]
+                    mean_nz, ci_nz = mean_ci(method_betas_array[:, nz_idx], axis=0)
+                    coef_data.append({
+                        'coef_name': rf"$\beta_{j+1}$",
+                        'method': method,
+                        'value': mean_nz[i],
+                        'ci_low': mean_nz[i] - ci_nz[i],
+                        'ci_high': mean_nz[i] + ci_nz[i]
+                    })
         
         # Create DataFrame and plot
         coef_df = pd.DataFrame(coef_data)
@@ -395,12 +398,12 @@ def create_final_plot(scenario_id, df_synthetic, save_path=None):
         coef_df.sort_values('coef_name', inplace=True)
         
         # Plot the coefficients
-        methods = ['GT', 'Lasso', 'NIMO']
+        methods = ['GT'] + available_methods
         w = 0.24
         x = np.arange(len(labels_math))
         
         # Draw bars + CI whiskers
-        for i, m in enumerate(["GT","Lasso","NIMO"]):
+        for i, m in enumerate(methods):
             sub = coef_df[coef_df["method"] == m]
             if not sub.empty:
                 ax2.bar(x + (i-1)*w, sub["value"], width=w,
@@ -415,7 +418,7 @@ def create_final_plot(scenario_id, df_synthetic, save_path=None):
         if method_betas:
             # Get best F1 iteration for each method
             best_iteration_values = {}
-            for method in ['Lasso', 'NIMO']:
+            for method in available_methods:
                 if method in method_betas:
                     method_rows = dd[dd['model_name'] == method]
                     if not method_rows.empty:
@@ -518,7 +521,7 @@ def create_final_plot(scenario_id, df_synthetic, save_path=None):
     # --- (C) Zero coefficients heatmap (best-F1 run) ---
     if len(z_idx) > 0:
         heatmap_data = []
-        for method in ['Lasso', 'NIMO']:
+        for method in available_methods:
             # pick the best F1 iteration for this method
             method_rows = dd[dd['model_name'] == method]
             if method_rows.empty:

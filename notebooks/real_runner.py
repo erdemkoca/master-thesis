@@ -29,7 +29,7 @@ from methods.neural_net import run_neural_net
 # =============================================================================
 # Example: EXCLUDE_DATASETS = ["boston", "breast_cancer"]  # Exclude these datasets
 # Example: EXCLUDE_DATASETS = []  # Run all datasets
-EXCLUDE_DATASETS = []  # Exclude diabetes and moon, run boston and housing
+EXCLUDE_DATASETS = []  # Exclude diabetes and moon, run boston and housing "boston", "housing", "diabetes"
 
 def get_real_datasets(exclude_datasets=None):
     """
@@ -73,10 +73,9 @@ def run_all_methods(X_tr, y_tr, X_va, y_va, X_te, y_te, seed, feature_names, dat
     methods = [
         ("Lasso", run_lasso),
         ("LassoNet", run_lassonet),
-        #("nimo_transformer", run_nimo),
-        ("NIMO", run_nimo_transformer),
+        ("NIMO_MLP", run_nimo_baseline),
+        ("NIMO_T", run_nimo_transformer),
         ("RF", run_random_forest),
-        #("nimo_baseline", run_nimo_baseline),
         ("NN", run_neural_net),
         # ("sparse_neural_net", run_sparse_neural_net),
         # ("sparse_linear_baseline", run_sparse_linear_baseline)
@@ -136,6 +135,10 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/real", e
         output_dir: Output directory for results
         exclude_datasets: List of dataset IDs to exclude from running
     """
+    # Record pipeline start time
+    pipeline_start_time = time.time()
+    pipeline_start_datetime = datetime.now()
+    
     # Default rebalancing config
     if rebalance_config is None:
         rebalance_config = {"mode": "undersample", "target_pos": 0.5}
@@ -146,6 +149,7 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/real", e
     print("=" * 80)
     print("REAL DATASET EXPERIMENT RUNNER")
     print("=" * 80)
+    print(f"Pipeline started at: {pipeline_start_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Datasets: {len(all_datasets)} (real only)")
     print(f"Iterations per dataset: {n_iterations}")
     print(f"Rebalancing: {rebalance_config}")
@@ -256,6 +260,12 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/real", e
             print(f"✗ Error loading dataset {entry['id']}: {e}")
             continue
 
+    # Record pipeline end time and calculate duration
+    pipeline_end_time = time.time()
+    pipeline_end_datetime = datetime.now()
+    pipeline_duration_seconds = pipeline_end_time - pipeline_start_time
+    pipeline_duration_minutes = pipeline_duration_seconds / 60
+
     # Save results
     df = pd.DataFrame(all_results)
     output_file = os.path.join(output_dir, "experiment_results.csv")
@@ -264,6 +274,10 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/real", e
     # Save metadata
     metadata = {
         "timestamp": datetime.now().isoformat(),
+        "pipeline_start_time": pipeline_start_datetime.isoformat(),
+        "pipeline_end_time": pipeline_end_datetime.isoformat(),
+        "pipeline_duration_seconds": pipeline_duration_seconds,
+        "pipeline_duration_minutes": pipeline_duration_minutes,
         "n_iterations": n_iterations,
         "rebalance_config": rebalance_config,
         "n_datasets": len(all_datasets),
@@ -279,10 +293,12 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/real", e
     print("\n" + "=" * 80)
     print("REAL DATASET EXPERIMENT SUMMARY")
     print("=" * 80)
+    print(f"Pipeline started at: {pipeline_start_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Pipeline finished at: {pipeline_end_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Pipeline duration: {pipeline_duration_minutes:.2f} minutes ({pipeline_duration_seconds:.1f} seconds)")
     print(f"Total results: {len(all_results)}")
     print(f"Datasets processed: {len(all_datasets)}")
     print(f"Iterations per dataset: {n_iterations}")
-    print(f"Total time: {time.time() - start_time:.1f} seconds")
     print(f"Results saved to: {output_file}")
 
     # Print per-dataset summary
@@ -312,9 +328,10 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/real", e
         print(f"  {method_name}: {n_success}/{n_total} successful runs, avg F1: {avg_f1:.3f}")
 
     print(f"\n✓ Real dataset experiment completed successfully!")
+    print(f"✓ Total pipeline time: {pipeline_duration_minutes:.2f} minutes")
     return df
 
 
 if __name__ == "__main__":
     # Run with default settings and exclusion list
-    df = main(n_iterations=20, exclude_datasets=EXCLUDE_DATASETS)  # Start with 1 iteration for testing
+    df = main(n_iterations=7, exclude_datasets=EXCLUDE_DATASETS)  # Start with 1 iteration for testing

@@ -25,12 +25,14 @@ from methods.random_forest import run_random_forest
 from methods.neural_net import run_neural_net
 
 
-def discover_synthetic_scenarios(synthetic_data_path="../data/synthetic"):
+def discover_synthetic_scenarios(synthetic_data_path="../data/synthetic", n_train=500, n_val=200):
     """
     Dynamically discover all available synthetic scenarios by scanning the data directory.
 
     Args:
         synthetic_data_path: Path to synthetic data directory
+        n_train: Number of training samples per iteration
+        n_val: Number of validation samples per iteration
 
     Returns:
         list: List of discovered synthetic dataset configurations
@@ -66,8 +68,8 @@ def discover_synthetic_scenarios(synthetic_data_path="../data/synthetic"):
                 "kind": "synthetic",
                 "id": scenario_id,
                 "path": str(data_path),
-                "n_train": 1400,  # Default values
-                "n_val": 600,
+                "n_train": n_train,
+                "n_val": n_val,
                 "desc": f"Synthetic scenario {scenario_id} (auto-discovered)"
             }
             synthetic_scenarios.append(scenario_config)
@@ -99,12 +101,11 @@ def run_all_methods(X_tr, y_tr, X_va, y_va, X_te, y_te, seed, feature_names, dat
     """
     methods = [
         ("Lasso", run_lasso),
-        #("LassoNet", run_lassonet),
-        #("nimo_transformer", run_nimo),
-        ("NIMO", run_nimo_transformer),
+        ("LassoNet", run_lassonet),
+        ("NIMO_MLP", run_nimo_baseline),
+        ("NIMO_T", run_nimo_transformer),
         ("RF", run_random_forest),
-        #("nimo_baseline", run_nimo_baseline),
-        #("NN", run_neural_net),
+        ("NN", run_neural_net),
         # ("sparse_neural_net", run_sparse_neural_net),
         # ("sparse_linear_baseline", run_sparse_linear_baseline)
     ]
@@ -153,7 +154,7 @@ def run_all_methods(X_tr, y_tr, X_va, y_va, X_te, y_te, seed, feature_names, dat
     return results
 
 
-def main(n_iterations=30, rebalance_config=None, output_dir="../results/synthetic"):
+def main(n_iterations=30, rebalance_config=None, output_dir="../results/synthetic", n_train=500, n_val=200):
     """
     Main experiment runner for synthetic datasets only.
 
@@ -161,19 +162,22 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/syntheti
         n_iterations: Number of iterations per dataset
         rebalance_config: Rebalancing configuration dict
         output_dir: Output directory for results
+        n_train: Number of training samples per iteration
+        n_val: Number of validation samples per iteration
     """
     # Default rebalancing config
     if rebalance_config is None:
         rebalance_config = {"mode": "undersample", "target_pos": 0.5}
 
     # Get only synthetic datasets
-    all_datasets = discover_synthetic_scenarios()
+    all_datasets = discover_synthetic_scenarios(n_train=n_train, n_val=n_val)
 
     print("=" * 80)
     print("SYNTHETIC EXPERIMENT RUNNER")
     print("=" * 80)
     print(f"Datasets: {len(all_datasets)} (synthetic only)")
     print(f"Iterations per dataset: {n_iterations}")
+    print(f"Sample sizes: {n_train} train, {n_val} val")
     print(f"Rebalancing: {rebalance_config}")
     print(f"NIMO variants: nimo_transformer (updated), nimo_transformer_old (original)")
     print(f"Output directory: {output_dir}")
@@ -358,4 +362,4 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/syntheti
 
 if __name__ == "__main__":
     # Run with default settings
-    df = main(n_iterations=2)  # Start with 1 iteration for testing
+    df = main(n_iterations=10, n_train=1400, n_val=600)  # Start with 1 iteration for testing 10:14

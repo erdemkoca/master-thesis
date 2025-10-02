@@ -9,7 +9,30 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
-from matplotlib.ticker import MultipleLocator, FixedLocator
+from matplotlib.ticker import MultipleLocator
+import re
+
+# Canonical dataset mapping (use short keys internally, map to titles for display)
+DATASET_TITLES = {
+    "moon": "Two-Moons Dataset",
+    "boston": "Boston Housing Dataset", 
+    "housing": "California Housing Dataset",
+    "diabetes": "Diabetes Progression Dataset",
+}
+
+# Method lists for consistency
+F1_METHODS = ["Lasso", "LassoNet", "NN", "NIMO_T", "NIMO_MLP", "RF"]
+COEFF_METHODS = ['Lasso', 'NIMO_T', 'NIMO_MLP']
+
+def get_canonical_dataset_key(dataset_description):
+    """Map dataset description to canonical short key."""
+    mapping = {
+        "Two-Moon Dataset (binary classification)": "moon",
+        "Boston Housing (binary classification)": "boston", 
+        "California Housing (binary classification)": "housing",
+        "Diabetes Progression (binary classification)": "diabetes",
+    }
+    return mapping.get(dataset_description, dataset_description.lower())
 
 # Force consistent settings for perfect plots
 matplotlib.use('Agg')
@@ -129,7 +152,7 @@ def standard_boxplot(ax, df, x="Method", y="F1", order=None, colors=None,
 
     # X ticks/labels
     ax.set_xticks(np.arange(1, len(cats) + 1))
-    ax.set_xticklabels(cats, rotation=90, ha="right")
+    ax.set_xticklabels(cats, rotation=0, ha="center")
 
     # Title/labels
     ax.set_title(title, fontsize=14, pad=8)
@@ -147,145 +170,106 @@ def standard_boxplot(ax, df, x="Method", y="F1", order=None, colors=None,
     # Slight margin to reduce whitespace
     ax.margins(x=0.02)
 
-def count_outliers_by_group(df, x="Method", y="F1", order=None, whis=1.5):
-    """Count outliers per group for diagnostic purposes."""
-    cats = order or sorted(df[x].unique().tolist())
-    out = {}
-    for c in cats:
-        v = df.loc[df[x]==c, y].to_numpy()
-        q1, q3 = np.percentile(v, [25, 75])
-        iqr = q3 - q1
-        if isinstance(whis, (int, float)):
-            low, high = q1 - whis*iqr, q3 + whis*iqr
-        else:
-            low, high = np.percentile(v, whis[0]), np.percentile(v, whis[1])
-        out[c] = int(((v < low) | (v > high)).sum())
-    return out
-
-def get_small_coefficients_threshold(method_betas, feature_names, dataset_id, df_real, percentile=25):
+def get_small_coefficients_indices(dd, dataset_key, feature_names):
     """
-    Dynamically determine which coefficients are 'small' based on absolute values.
+    Get small coefficients indices based on NIMO_T best F1 iteration.
     Returns indices of features with small coefficients.
     """
-    if not method_betas:
+    if dataset_key not in ["boston", "diabetes", "housing"]:
         return []
     
-    # Dataset-specific adjustments
-    if dataset_id in ["diabetes", "boston"]:
-        # For diabetes and boston, use only NIMO coefficients for threshold calculation
-        if 'NIMO' in method_betas:
-            nimo_betas = method_betas['NIMO']
-            mean_coefs, _ = mean_ci(nimo_betas, axis=0)
-            all_abs_coefs = np.abs(mean_coefs)
-            print(f"  - Using NIMO coefficients for {dataset_id} threshold calculation")
-            
-            # Use absolute threshold instead of percentile for more control
-            if dataset_id == "diabetes":
-                # For diabetes: take only the 2 smallest coefficients for heatmap
-                # Use best F1 iteration instead of averaged coefficients
-                dd = df_real[df_real['dataset_id'] == dataset_id].copy()
-                nimo_data = dd[dd['model_name'] == 'NIMO']
-                best_row = nimo_data.loc[nimo_data['f1'].idxmax()]
-                
-                # Parse coefficients from best F1 iteration
-                info, _ = destring_coeff(best_row)
-                if info is not None and info["values"] is not None:
-                    best_coefs = to_raw_beta(info)
-                    abs_coefs = np.abs(best_coefs)
-                    
-                    # Get indices of the 2 smallest coefficients
-                    smallest_indices = np.argsort(abs_coefs)[:2]
-                    small_coef_indices = smallest_indices.tolist()
-                    print(f"  - Diabetes: using only 2 smallest coefficients from best F1 iteration")
-                    print(f"  - Small coefficient features: {[feature_names[i] for i in small_coef_indices]}")
-                    return small_coef_indices
-                else:
-                    return []
-            else:  # boston
-                # For boston: use best F1 iteration instead of averaged coefficients
-                dd = df_real[df_real['dataset_id'] == dataset_id].copy()
-                nimo_data = dd[dd['model_name'] == 'NIMO']
-                best_row = nimo_data.loc[nimo_data['f1'].idxmax()]
-                
-                # Parse coefficients from best F1 iteration
-                info, _ = destring_coeff(best_row)
-                if info is not None and info["values"] is not None:
-                    best_coefs = to_raw_beta(info)
-                    abs_coefs = np.abs(best_coefs)
-                    
-                    # Use threshold 0.5 on best F1 iteration (more features in heatmap)
-                    threshold = 0.5
-                    small_indices = np.where(abs_coefs < threshold)[0]
-                    small_coef_indices = small_indices.tolist()
-                    print(f"  - Boston: using best F1 iteration with threshold {threshold}")
-                    print(f"  - Small coefficient features: {[feature_names[i] for i in small_coef_indices]}")
-                    return small_coef_indices
-                else:
-                    return []
-            print(f"  - Using absolute threshold: {threshold}")
-        else:
-            return []
-    elif dataset_id == "housing":
-        # For housing: use best F1 iteration instead of averaged coefficients
-        dd = df_real[df_real['dataset_id'] == dataset_id].copy()
-        nimo_data = dd[dd['model_name'] == 'NIMO']
-        best_row = nimo_data.loc[nimo_data['f1'].idxmax()]
+    # Get NIMO_T best F1 iteration
+    nimo_data = dd[dd['model_name'] == 'NIMO_T']
+    if nimo_data.empty:
+        return []
+    
+    best_row = nimo_data.loc[nimo_data['f1'].idxmax()]
+    info, _ = destring_coeff(best_row)
+    
+    if info is None or info["values"] is None:
+        return []
+    
+    try:
+        beta_raw = to_raw_beta(info)
+        abs_coefs = np.abs(beta_raw)
         
-        # Parse coefficients from best F1 iteration
-        info, _ = destring_coeff(best_row)
-        if info is not None and info["values"] is not None:
-            best_coefs = to_raw_beta(info)
-            abs_coefs = np.abs(best_coefs)
-            
-            # Use threshold 0.01 on best F1 iteration (small coefficients)
-            threshold = 0.01
-            small_indices = np.where(abs_coefs < threshold)[0]
-            small_coef_indices = small_indices.tolist()
-            print(f"  - Housing: using best F1 iteration with threshold {threshold}")
+        if dataset_key == "diabetes":
+            # Take bottom 6 by magnitude
+            smallest_indices = np.argsort(abs_coefs)[:6]
+            small_coef_indices = smallest_indices.tolist()
+            print(f"  - Diabetes: using 6 smallest coefficients from NIMO_T best F1 iteration")
             print(f"  - Small coefficient features: {[feature_names[i] for i in small_coef_indices]}")
             return small_coef_indices
-        else:
-            return []
-    else:
-        # For other datasets, use all methods
-        all_abs_coefs = []
-        for method, betas in method_betas.items():
-            mean_coefs, _ = mean_ci(betas, axis=0)
-            all_abs_coefs.extend(np.abs(mean_coefs))
-        
-        if len(all_abs_coefs) == 0:
-            return []
-        
-        # Calculate threshold as percentile of absolute values
-        threshold = np.percentile(all_abs_coefs, percentile)
+            
+        elif dataset_key == "boston":
+            # τ_abs = 0.1 and bottom 50% union
+            threshold_abs = 0.1
+            small_indices_abs = np.where(abs_coefs < threshold_abs)[0]
+            
+            threshold_percentile = np.percentile(abs_coefs, 50)
+            small_indices_percentile = np.where(abs_coefs < threshold_percentile)[0]
+            
+            small_indices = np.union1d(small_indices_abs, small_indices_percentile)
+            small_coef_indices = small_indices.tolist()
+            print(f"  - Boston: using combined approach (abs<0.1 OR bottom 50%)")
+            print(f"  - Small coefficient features: {[feature_names[i] for i in small_coef_indices]}")
+            return small_coef_indices
+            
+        elif dataset_key == "housing":
+            # τ_abs = 0.02 and bottom 50% union
+            threshold_abs = 0.02
+            small_indices_abs = np.where(abs_coefs < threshold_abs)[0]
+            
+            threshold_percentile = np.percentile(abs_coefs, 50)
+            small_indices_percentile = np.where(abs_coefs < threshold_percentile)[0]
+            
+            small_indices = np.union1d(small_indices_abs, small_indices_percentile)
+            small_coef_indices = small_indices.tolist()
+            print(f"  - Housing: using combined approach (abs<0.02 OR bottom 50%)")
+            print(f"  - Small coefficient features: {[feature_names[i] for i in small_coef_indices]}")
+            return small_coef_indices
+            
+    except Exception as e:
+        print(f"Warning: Could not process NIMO_T coefficients for small coefficients: {e}")
+        return []
     
-    # Find features with mean absolute coefficient below threshold
-    small_coef_indices = []
-    for method, betas in method_betas.items():
-        mean_coefs, _ = mean_ci(betas, axis=0)
-        small_indices = np.where(np.abs(mean_coefs) <= threshold)[0]
-        small_coef_indices.extend(small_indices)
-    
-    # Remove duplicates and return
-    small_coef_indices = list(set(small_coef_indices))
-    small_coef_indices.sort()
-    
-    print(f"  - Small coefficient threshold: {threshold:.4f}")
-    print(f"  - Small coefficient features: {[feature_names[i] for i in small_coef_indices]}")
-    
-    return small_coef_indices
+    return []
 
-def create_coefficients_across_iterations_plot(ax, dd, method_betas, feature_names, small_coef_indices, dataset_id, feature_colors):
-    """Create coefficients across iterations plot for 2x2 grid (top right) - original error bar plot."""
-    if not method_betas or len(feature_names) == 0:
+def create_coefficients_variance_plot(ax, dd, feature_names, dataset_key, feature_colors):
+    """Create coefficients variance plot (mean ± 95% CI across iterations)."""
+    if len(feature_names) == 0:
         ax.text(0.5, 0.5, "No coefficient data available", 
                 ha="center", va="center", transform=ax.transAxes)
         ax.axis("off")
         return
     
-    # Calculate mean coefficients with confidence intervals (signed values) - same as original
-    coef_data = []
+    # Collect coefficients for each method across iterations
+    method_betas = {}
+    for method in COEFF_METHODS:
+        try:
+            betas = []
+            for _, row in dd[dd['model_name'] == method].iterrows():
+                info, _ = destring_coeff(row)
+                if info is not None and info["values"] is not None:
+                    try:
+                        beta_raw = to_raw_beta(info)
+                        betas.append(beta_raw)
+                    except Exception as e:
+                        print(f"Warning: Could not process coefficients for {method}: {e}")
+                        continue
+            if betas:
+                method_betas[method] = np.array(betas)
+        except Exception as e:
+            print(f"Warning: Could not collect coefficients for {method}")
     
+    if not method_betas:
+        ax.text(0.5, 0.5, "No coefficient data available", 
+                ha="center", va="center", transform=ax.transAxes)
+        ax.axis("off")
+        return
+    
+    # Calculate mean coefficients with confidence intervals
+    coef_data = []
     for method, betas in method_betas.items():
         mean_coefs, ci_coefs = mean_ci(betas, axis=0)
         for i, (mean_coef, ci_coef, name) in enumerate(zip(mean_coefs, ci_coefs, feature_names)):
@@ -300,23 +284,41 @@ def create_coefficients_across_iterations_plot(ax, dd, method_betas, feature_nam
     if coef_data:
         coef_df = pd.DataFrame(coef_data)
         
+        # Check if NIMO_MLP normalization is needed
+        lasso_coefs = coef_df[coef_df['method'] == 'Lasso']['mean'].values
+        nimo_mlp_coefs = coef_df[coef_df['method'] == 'NIMO_MLP']['mean'].values
+        
+        normalization_applied = False
+        if len(lasso_coefs) > 0 and len(nimo_mlp_coefs) > 0:
+            nz_lasso = np.abs(lasso_coefs[lasso_coefs != 0])
+            nz_mlp = np.abs(nimo_mlp_coefs[nimo_mlp_coefs != 0])
+            
+            if nz_lasso.size and nz_mlp.size:
+                scale_factor = np.median(nz_lasso) / np.median(nz_mlp)
+                if np.isfinite(scale_factor) and scale_factor > 0:
+                    print(f"  - Scaling NIMO_MLP coefficients by factor: {scale_factor:.6f}")
+                    
+                    # Apply scaling to NIMO_MLP coefficients
+                    nimo_mlp_mask = coef_df['method'] == 'NIMO_MLP'
+                    coef_df.loc[nimo_mlp_mask, 'mean'] *= scale_factor
+                    coef_df.loc[nimo_mlp_mask, 'ci_low'] *= scale_factor
+                    coef_df.loc[nimo_mlp_mask, 'ci_high'] *= scale_factor
+                    normalization_applied = True
+        
         # Sort features by average absolute coefficient across methods
         feature_avg_abs = coef_df.groupby('feature')['mean'].apply(lambda x: np.mean(np.abs(x))).sort_values(ascending=False)
-        top_features = feature_avg_abs.index.tolist()  # All features, sorted by importance
+        top_features = feature_avg_abs.index.tolist()
         
-        # Note: All custom ordering removed since shortened names avoid overlap
-        # Features will be ordered by NIMO coefficient magnitude (descending) as intended
-        
-        # Filter to top features (excluding small ones)
+        # Filter to top features
         plot_df = coef_df[coef_df['feature'].isin(top_features)].copy()
         plot_df['feature'] = pd.Categorical(plot_df['feature'], top_features, ordered=True)
         plot_df = plot_df.sort_values('feature')
         
-        # Create grouped bar plot with error bars (same as original)
+        # Create grouped bar plot with error bars
         x = np.arange(len(top_features))
         w = 0.35
         
-        for i, method in enumerate(['Lasso', 'NIMO']):
+        for i, method in enumerate(COEFF_METHODS):
             method_data = plot_df[plot_df['method'] == method]
             if not method_data.empty:
                 # Draw bars
@@ -338,16 +340,18 @@ def create_coefficients_across_iterations_plot(ax, dd, method_betas, feature_nam
         ax.set_ylim(min_val - margin, max_val + margin)
         
         # Style the coefficient plot
-        ax.set_title("Feature Coefficients (variance)", fontsize=14)
+        title = "Feature Coefficients (variance)"
+        if normalization_applied:
+            title += ", NIMO_MLP normalized"
+        ax.set_title(title, fontsize=14)
         ax.set_ylabel("Coefficient Value", fontsize=12)
         ax.tick_params(axis="both", which="both", direction="out", length=6, width=1.2, labelsize=12)
         
         # Set y-axis ticks with dataset-specific intervals
-        from matplotlib.ticker import MultipleLocator
-        if dataset_id == "housing":
+        if dataset_key == "housing":
             ax.yaxis.set_major_locator(MultipleLocator(0.5))
             ax.yaxis.grid(True, linestyle="--", linewidth=0.8, color="#999999", alpha=0.3)
-        elif dataset_id == "diabetes":
+        elif dataset_key == "diabetes":
             ax.yaxis.set_major_locator(MultipleLocator(8))
             ax.yaxis.grid(True, linestyle="--", linewidth=0.8, color="#999999", alpha=0.2)
         else:
@@ -379,8 +383,8 @@ def create_coefficients_across_iterations_plot(ax, dd, method_betas, feature_nam
                 ha="center", va="center", transform=ax.transAxes)
         ax.axis("off")
 
-def create_best_iteration_coefficients_plot(ax, dd, feature_names, small_coef_indices, dataset_id, feature_colors):
-    """Create best iteration coefficients plot for 2x2 grid (bottom left) - exact values, no error bars."""
+def create_best_iteration_coefficients_plot(ax, dd, feature_names, small_coef_indices, dataset_key, feature_colors):
+    """Create best iteration coefficients plot (exact values, no error bars)."""
     if len(feature_names) == 0:
         ax.text(0.5, 0.5, "No coefficient data available", 
                 ha="center", va="center", transform=ax.transAxes)
@@ -390,12 +394,15 @@ def create_best_iteration_coefficients_plot(ax, dd, feature_names, small_coef_in
     # Get best F1 iteration for each method
     coef_data = []
     
-    for method in ['Lasso', 'NIMO']:
+    for method in COEFF_METHODS:
         method_rows = dd[dd['model_name'] == method]
-        if method_rows.empty:
+        if method_rows.empty or method_rows['f1'].dropna().empty:
             continue
             
-        best_row = method_rows.loc[method_rows['f1'].idxmax()]
+        best_idx = method_rows['f1'].idxmax()
+        if pd.isna(best_idx):
+            continue
+        best_row = method_rows.loc[best_idx]
         info, _ = destring_coeff(best_row)
         
         if info is not None and info["values"] is not None:
@@ -414,6 +421,25 @@ def create_best_iteration_coefficients_plot(ax, dd, feature_names, small_coef_in
     if coef_data:
         coef_df = pd.DataFrame(coef_data)
         
+        # Check if NIMO_MLP normalization is needed
+        lasso_coefs = coef_df[coef_df['method'] == 'Lasso']['value'].values
+        nimo_mlp_coefs = coef_df[coef_df['method'] == 'NIMO_MLP']['value'].values
+        
+        normalization_applied = False
+        if len(lasso_coefs) > 0 and len(nimo_mlp_coefs) > 0:
+            nz_lasso = np.abs(lasso_coefs[lasso_coefs != 0])
+            nz_mlp = np.abs(nimo_mlp_coefs[nimo_mlp_coefs != 0])
+            
+            if nz_lasso.size and nz_mlp.size:
+                scale_factor = np.median(nz_lasso) / np.median(nz_mlp)
+                if np.isfinite(scale_factor) and scale_factor > 0:
+                    print(f"  - Scaling NIMO_MLP coefficients by factor: {scale_factor:.6f}")
+                    
+                    # Apply scaling to NIMO_MLP coefficients
+                    nimo_mlp_mask = coef_df['method'] == 'NIMO_MLP'
+                    coef_df.loc[nimo_mlp_mask, 'value'] *= scale_factor
+                    normalization_applied = True
+        
         # Sort features by average absolute coefficient across methods
         feature_avg_abs = coef_df.groupby('feature')['value'].apply(lambda x: np.mean(np.abs(x))).sort_values(ascending=False)
         top_features = feature_avg_abs.index.tolist()
@@ -422,6 +448,8 @@ def create_best_iteration_coefficients_plot(ax, dd, feature_names, small_coef_in
         if small_coef_indices:
             small_feature_names = [feature_names[i] for i in small_coef_indices]
             top_features = [f for f in top_features if f not in small_feature_names]
+            print(f"  - Excluding small coefficients from main plot: {small_feature_names}")
+            print(f"  - Main plot will show: {top_features}")
         
         # Filter to top features (excluding small ones)
         plot_df = coef_df[coef_df['feature'].isin(top_features)].copy()
@@ -432,7 +460,7 @@ def create_best_iteration_coefficients_plot(ax, dd, feature_names, small_coef_in
         x = np.arange(len(top_features))
         w = 0.35
         
-        for i, method in enumerate(['Lasso', 'NIMO']):
+        for i, method in enumerate(COEFF_METHODS):
             method_data = plot_df[plot_df['method'] == method]
             if not method_data.empty:
                 # Draw bars (no error bars)
@@ -446,19 +474,21 @@ def create_best_iteration_coefficients_plot(ax, dd, feature_names, small_coef_in
         ax.set_ylim(min_val - margin, max_val + margin)
         
         # Style the coefficient plot
-        ax.set_title("Feature Coefficients (best iteration)", fontsize=14)
+        title = "Feature Coefficients (best iteration)"
+        if normalization_applied:
+            title += ", NIMO_MLP normalized"
+        ax.set_title(title, fontsize=14)
         ax.set_ylabel("Coefficient Value", fontsize=12)
         ax.tick_params(axis="both", which="both", direction="out", length=6, width=1.2, labelsize=12)
         
         # Set y-axis ticks with dataset-specific intervals
-        from matplotlib.ticker import MultipleLocator
-        if dataset_id == "housing":
+        if dataset_key == "housing":
             ax.yaxis.set_major_locator(MultipleLocator(0.5))
             ax.yaxis.grid(True, linestyle="--", linewidth=0.8, color="#999999", alpha=0.3)
-        elif dataset_id == "diabetes":
-            ax.yaxis.set_major_locator(MultipleLocator(8))
+        elif dataset_key == "diabetes":
+            ax.yaxis.set_major_locator(MultipleLocator(2))
             ax.yaxis.grid(True, linestyle="--", linewidth=0.8, color="#999999", alpha=0.2)
-        elif dataset_id == "boston":
+        elif dataset_key == "boston":
             ax.yaxis.set_major_locator(MultipleLocator(2))
             ax.yaxis.grid(True, linestyle="--", linewidth=0.8, color="#999999", alpha=0.3)
         else:
@@ -490,16 +520,70 @@ def create_best_iteration_coefficients_plot(ax, dd, feature_names, small_coef_in
                 ha="center", va="center", transform=ax.transAxes)
         ax.axis("off")
 
-def create_real_plot(dataset_id, df_real, save_path=None):
+def create_small_coefficients_heatmap(ax, dd, feature_names, small_coef_indices):
+    """Create small coefficients heatmap (best iteration)."""
+    if not small_coef_indices:
+        ax.text(0.5, 0.5, "No small coefficient data available", 
+                ha="center", va="center", transform=ax.transAxes)
+        ax.axis("off")
+        return
+    
+    heatmap_data = []
+    for method in COEFF_METHODS:
+        # pick the best F1 iteration for this method
+        method_rows = dd[dd['model_name'] == method]
+        if method_rows.empty or method_rows['f1'].dropna().empty:
+            continue
+        best_idx = method_rows['f1'].idxmax()
+        if pd.isna(best_idx):
+            continue
+        best_row = method_rows.loc[best_idx]
+
+        info, _ = destring_coeff(best_row)
+        if info is not None and info["values"] is not None:
+            try:
+                beta_raw = to_raw_beta(info)
+                for j in small_coef_indices:
+                    heatmap_data.append({
+                        'method': method,
+                        'feature': feature_names[j],
+                        'value': beta_raw[j]
+                    })
+            except Exception as e:
+                print(f"Warning: Could not process coefficients for {method} in best iteration: {e}")
+                continue
+
+    if heatmap_data:
+        heatmap_df = pd.DataFrame(heatmap_data)
+        heatmap_pivot = heatmap_df.pivot(index='method', columns='feature', values='value')
+
+        # Transpose the heatmap for horizontal arrangement (features as rows, methods as columns)
+        heatmap_pivot_t = heatmap_pivot.T
+
+        sns.heatmap(
+            heatmap_pivot_t, annot=True, fmt='.3f', cmap='RdBu_r', center=0,
+            ax=ax, cbar_kws={'shrink': 0.8}
+        )
+        ax.set_title('Small Coefficients (best iteration)', fontsize=14)
+        ax.set_xlabel('Method')
+        ax.set_ylabel('Feature')
+    else:
+        ax.text(0.5, 0.5, "No small coefficient data available", 
+                ha="center", va="center", transform=ax.transAxes)
+        ax.axis("off")
+
+def create_real_plot(dataset_description, df_real, save_path=None):
     """Create the final perfect per-dataset figure for real datasets."""
     
-    print(f"Creating real dataset plot for {dataset_id}...")
+    # Get canonical dataset key
+    dataset_key = get_canonical_dataset_key(dataset_description)
+    print(f"Creating real dataset plot for {dataset_key}...")
     
     # Filter data for this dataset
-    dd = df_real[df_real['dataset_id'] == dataset_id].copy()
+    dd = df_real[df_real['dataset_description'] == dataset_description].copy()
     
     if dd.empty:
-        print(f"No data found for dataset {dataset_id}")
+        print(f"No data found for dataset {dataset_key}")
         return None
     
     # Get feature names
@@ -512,16 +596,17 @@ def create_real_plot(dataset_id, df_real, save_path=None):
     
     if feature_names is None:
         # Fallback: create generic feature names
-        n_features = len(dd.iloc[0].get('coefficients', '{}'))
-        feature_names = [f"feature_{j}" for j in range(n_features)]
+        co = parse_json_safe(dd.iloc[0].get('coefficients', '{}')) or {}
+        n_features = len(co.get('values', []))
+        feature_names = [f"β{i+1}" for i in range(n_features)]
     
-    # Refactor feature names to beta notation (β₁, β₂, β₃, etc.) or shorten long names
-    def refactor_feature_names(names, dataset_id):
+    # Refactor feature names to beta notation (β₁, β₂, β₃, etc.) or shorten long names for specific datasets
+    def refactor_feature_names(names, dataset_key):
         """Convert feature_0, feature_1, etc. to β₁, β₂, etc., or shorten long names for specific datasets."""
         refactored = []
         
         # Dataset-specific feature name mappings
-        if dataset_id == "housing":
+        if dataset_key == "housing":
             name_mapping = {
                 "longitude": "long",
                 "latitude": "lat", 
@@ -534,7 +619,7 @@ def create_real_plot(dataset_id, df_real, save_path=None):
             }
             for name in names:
                 refactored.append(name_mapping.get(name, name))
-        elif dataset_id == "boston":
+        elif dataset_key == "boston":
             name_mapping = {
                 "LSTAT": "LS",
                 "INDUS": "IN",
@@ -555,62 +640,30 @@ def create_real_plot(dataset_id, df_real, save_path=None):
                     refactored.append(name)
         return refactored
     
-    feature_names = refactor_feature_names(feature_names, dataset_id)
+    feature_names = refactor_feature_names(feature_names, dataset_key)
     
     # Extract F1 scores for boxplot
     f1_tbl = dd.pivot_table(index="iteration", columns="model_name", values="f1")
-    
-    # Collect model coefficients for feature importance
-    method_betas = {}
-    for method in ['Lasso', 'NIMO']:
-        try:
-            betas = []
-            for _, row in dd[dd['model_name'] == method].iterrows():
-                info, _ = destring_coeff(row)
-                if info is not None and info["values"] is not None:
-                    try:
-                        beta_raw = to_raw_beta(info)
-                        betas.append(beta_raw)
-                    except Exception as e:
-                        print(f"Warning: Could not process coefficients for {method}: {e}")
-                        continue
-            if betas:
-                method_betas[method] = np.array(betas)
-        except Exception as e:
-            print(f"Warning: Could not collect coefficients for {method}")
-    
-    # Determine small coefficients for heatmap (dataset-specific)
-    # Moon dataset: always use 2-panel layout (no heatmap)
-    if dataset_id == "moon":
-        small_coef_indices = []
-        print(f"  - Moon dataset: using 2-panel layout (no heatmap)")
-    else:
-        # Use ultra-conservative threshold - only the absolute smallest coefficients go to heatmap
-        small_coef_indices = get_small_coefficients_threshold(method_betas, feature_names, dataset_id, df_real, percentile=1)
     
     # Define consistent, distinct palettes
     BOX_COLORS = {
         "Lasso":        "#396AB1",   # blue
         "LassoNet":     "#00A0A0",   # teal
         "NN":           "#B07AA1",   # purple
-        "NIMO":         "#DA7C30",   # orange
+        "NIMO_T":       "#DA7C30",   # orange
+        "NIMO_MLP":     "#FF6B35",   # red-orange
         "RF":           "#9C755F",   # brown
     }
     
     # Feature importance colors
     FEATURE_COLORS = {
         "Lasso": "#396AB1",          # same blue as boxplot Lasso
-        "NIMO":  "#DA7C30",          # same orange as boxplot NIMO
+        "NIMO_T": "#DA7C30",         # same orange as boxplot NIMO_T
+        "NIMO_MLP": "#FF6B35",       # red-orange
     }
     
-    # Shared styling constants
-    TITLE_SIZE = 14
-    TICK_SIZE = 12
-    
-    # Determine layout based on dataset and small coefficients
-    has_small_coefs = len(small_coef_indices) > 0
-    
-    if dataset_id == "moon":
+    # Determine layout based on dataset
+    if dataset_key == "moon":
         # Moon: 2-panel horizontal layout (no heatmap) - F1 wider, coefficients narrower
         fig = plt.figure(figsize=(12, 6))
         from matplotlib.gridspec import GridSpec
@@ -618,7 +671,7 @@ def create_real_plot(dataset_id, df_real, save_path=None):
                      width_ratios=[1.5, 1.0])
         
         # Global figure title
-        fig.suptitle("Two-Moons Dataset", fontsize=16, y=0.98)
+        fig.suptitle(DATASET_TITLES[dataset_key], fontsize=16, y=0.98)
         
         # Left: F1 boxplot
         ax1 = fig.add_subplot(gs[0, 0])
@@ -627,20 +680,15 @@ def create_real_plot(dataset_id, df_real, save_path=None):
         ax2 = fig.add_subplot(gs[0, 1])
         ax3 = None  # No heatmap panel
         ax4 = None  # No additional plot
-    elif has_small_coefs and dataset_id in ["boston", "housing", "diabetes"]:
+    elif dataset_key in ["boston", "housing", "diabetes"]:
         # Boston, Housing, Diabetes: 2x2 grid layout
         fig = plt.figure(figsize=(16, 12))
         from matplotlib.gridspec import GridSpec
         gs = GridSpec(nrows=2, ncols=2, figure=fig, 
                      width_ratios=[1.0, 1.0], height_ratios=[1.0, 1.0])
         
-        # Global figure title with proper dataset names
-        dataset_titles = {
-            "boston": "Boston Housing Dataset",
-            "housing": "California Housing Dataset", 
-            "diabetes": "Diabetes Progression Dataset"
-        }
-        fig.suptitle(dataset_titles[dataset_id], fontsize=16, y=0.98)
+        # Global figure title
+        fig.suptitle(DATASET_TITLES[dataset_key], fontsize=16, y=0.98)
         
         # Top Left: F1 across iterations
         ax1 = fig.add_subplot(gs[0, 0])
@@ -661,7 +709,7 @@ def create_real_plot(dataset_id, df_real, save_path=None):
                      width_ratios=[1.0, 1.5, 1.0])
         
         # Global figure title
-        fig.suptitle(f"Dataset {dataset_id}", fontsize=16, y=0.98)
+        fig.suptitle(f"Dataset {dataset_key}", fontsize=16, y=0.98)
         
         # Left: F1 boxplot
         ax1 = fig.add_subplot(gs[0, 0])
@@ -675,8 +723,7 @@ def create_real_plot(dataset_id, df_real, save_path=None):
     
     # --- (A) F1 boxplot with custom styling ---
     f1_long = f1_tbl.reset_index().melt(id_vars="iteration", var_name="Method", value_name="F1")
-    methods_order = ["Lasso", "LassoNet", "NN", "NIMO", "RF"]
-    present = [m for m in methods_order if m in set(f1_long['Method'])]
+    present = [m for m in F1_METHODS if m in set(f1_long['Method'])]
     df_plot = f1_long[f1_long['Method'].isin(present)].copy()
     
     # Create standard boxplot with visible outliers
@@ -691,197 +738,33 @@ def create_real_plot(dataset_id, df_real, save_path=None):
     # Make method labels horizontal for better readability
     ax1.set_xticklabels(ax1.get_xticklabels(), rotation=0, ha='center')
     
-    # Optional: Check outlier counts for diagnostic purposes
-    outlier_counts = count_outliers_by_group(df_plot, order=present, whis=1.5)
-    print(f"  - Outliers per method: {outlier_counts}")
-    
-    # For 2x2 grid: Create coefficients across iterations plot (top right)
-    if ax2 is not None and dataset_id in ["boston", "housing", "diabetes"] and has_small_coefs:
-        # Top Right: Coefficients across iterations (original error bar plot)
-        create_coefficients_across_iterations_plot(ax2, dd, method_betas, feature_names, small_coef_indices, dataset_id, FEATURE_COLORS)
-    
-    # For 2x2 grid: Create best iteration coefficients plot (bottom left)
-    if ax3 is not None and dataset_id in ["boston", "housing", "diabetes"] and has_small_coefs:
-        # Bottom Left: Best iteration coefficients (exact values, no error bars)
-        create_best_iteration_coefficients_plot(ax3, dd, feature_names, small_coef_indices, dataset_id, FEATURE_COLORS)
-    
     # --- (B) Feature coefficients comparison (signed values) ---
-    # For 2x2 grid: this is handled above, for other layouts use ax2
-    target_ax = ax2 if not (dataset_id in ["boston", "housing", "diabetes"] and has_small_coefs) else None
+    if ax2 is not None:
+        create_coefficients_variance_plot(ax2, dd, feature_names, dataset_key, FEATURE_COLORS)
     
-    if target_ax is not None and method_betas and len(feature_names) > 0:
-        # Calculate mean coefficients with confidence intervals (signed values)
-        coef_data = []
-        
-        for method, betas in method_betas.items():
-            mean_coefs, ci_coefs = mean_ci(betas, axis=0)
-            for i, (mean_coef, ci_coef, name) in enumerate(zip(mean_coefs, ci_coefs, feature_names)):
-                coef_data.append({
-                    'feature': name,
-                    'method': method,
-                    'mean': mean_coef,
-                    'ci_low': mean_coef - ci_coef,
-                    'ci_high': mean_coef + ci_coef
-                })
-        
-        if coef_data:
-            coef_df = pd.DataFrame(coef_data)
-            
-            # Sort features by average absolute coefficient across methods
-            feature_avg_abs = coef_df.groupby('feature')['mean'].apply(lambda x: np.mean(np.abs(x))).sort_values(ascending=False)
-            top_features = feature_avg_abs.index.tolist()  # All features, sorted by importance
-            
-            # Filter out small coefficients from main plot (they will be shown in heatmap)
-            if has_small_coefs and small_coef_indices:
-                small_feature_names = [feature_names[i] for i in small_coef_indices]
-                top_features = [f for f in top_features if f not in small_feature_names]
-                print(f"  - Excluding small coefficients from main plot: {small_feature_names}")
-                print(f"  - Main plot will show: {top_features}")
-            
-            # Filter to top features (excluding small ones)
-            plot_df = coef_df[coef_df['feature'].isin(top_features)].copy()
-            plot_df['feature'] = pd.Categorical(plot_df['feature'], top_features, ordered=True)
-            plot_df = plot_df.sort_values('feature')
-            
-            # Create grouped bar plot with error bars
-            x = np.arange(len(top_features))
-            w = 0.35
-            
-            for i, method in enumerate(['Lasso', 'NIMO']):
-                method_data = plot_df[plot_df['method'] == method]
-                if not method_data.empty:
-                    # Draw bars
-                    target_ax.bar(x + i*w, method_data['mean'], width=w,
-                           color=FEATURE_COLORS[method], edgecolor="black", linewidth=0.5, label=method)
-                    
-                    # Draw error bars
-                    target_ax.errorbar(
-                        x + i*w, method_data['mean'],
-                        yerr=[method_data['mean'] - method_data['ci_low'], 
-                              method_data['ci_high'] - method_data['mean']],
-                        fmt='none', ecolor='black', elinewidth=0.7, capsize=2
-                    )
-            
-            # Dynamic y-axis scaling
-            all_values = np.concatenate([plot_df['ci_low'].values, plot_df['ci_high'].values])
-            min_val, max_val = np.min(all_values), np.max(all_values)
-            margin = (max_val - min_val) * 0.1
-            target_ax.set_ylim(min_val - margin, max_val + margin)
-            
-            # Style the coefficient plot
-            plot_title = "Feature Coefficients (best iteration)" if (dataset_id in ["boston", "housing", "diabetes"] and has_small_coefs) else "Feature Coefficients (variance)"
-            target_ax.set_title(plot_title, fontsize=TITLE_SIZE)
-            target_ax.set_ylabel("Coefficient Value", fontsize=TICK_SIZE)
-            target_ax.tick_params(axis="both", which="both", direction="out", length=6, width=1.2, labelsize=TICK_SIZE)
-            
-            # Set y-axis ticks with dataset-specific intervals
-            from matplotlib.ticker import MultipleLocator
-            if dataset_id == "housing":
-                # Housing: 0.5-step grid lines
-                target_ax.yaxis.set_major_locator(MultipleLocator(0.5))
-                target_ax.yaxis.grid(True, linestyle="--", linewidth=0.8, color="#999999", alpha=0.3)
-            elif dataset_id == "diabetes":
-                # Diabetes: less grid lines (2-unit intervals)
-                target_ax.yaxis.set_major_locator(MultipleLocator(2))
-                target_ax.yaxis.grid(True, linestyle="--", linewidth=0.8, color="#999999", alpha=0.2)
-            else:
-                # Default: 4-unit intervals
-                target_ax.yaxis.set_major_locator(MultipleLocator(4))
-                target_ax.yaxis.grid(True, linestyle="--", linewidth=0.8, color="#999999", alpha=0.3)
-            target_ax.xaxis.grid(False)
-            
-            # Add horizontal reference lines at y=0 and ±2
-            target_ax.axhline(y=0, color='black', linestyle='-', linewidth=0.8, alpha=0.5)
-            target_ax.axhline(y=2, color='gray', linestyle=':', linewidth=0.8, alpha=0.7)
-            target_ax.axhline(y=-2, color='gray', linestyle=':', linewidth=0.8, alpha=0.7)
-            
-            target_ax.set_xticks(x + w/2)
-            target_ax.set_xticklabels(top_features, rotation=0, ha='center')
-            target_ax.set_facecolor((1,1,1,0))
-            
-            # Black frame
-            for s in target_ax.spines.values():
-                s.set_color('black')
-                s.set_linewidth(1.2)
-            
-            # Legend
-            target_ax.legend(
-                frameon=True, fancybox=True, framealpha=0.9,
-                borderpad=0.4, handlelength=1.5, labelspacing=0.5,
-                prop={"size": 12},
-                loc="upper right"
-            )
-        else:
-            target_ax.text(0.5, 0.5, "No feature importance data available", 
-                    ha="center", va="center", transform=target_ax.transAxes)
-            target_ax.axis("off")
-    elif target_ax is not None:
-        target_ax.text(0.5, 0.5, "No feature importance data available", 
-                ha="center", va="center", transform=target_ax.transAxes)
-        target_ax.axis("off")
+    # --- (C) Best iteration coefficients plot ---
+    if ax3 is not None and dataset_key in ["boston", "housing", "diabetes"]:
+        # Get small coefficients indices
+        small_coef_indices = get_small_coefficients_indices(dd, dataset_key, feature_names)
+        create_best_iteration_coefficients_plot(ax3, dd, feature_names, small_coef_indices, dataset_key, FEATURE_COLORS)
     
-    # --- (C) Small coefficients heatmap (best-F1 run) ---
-    # For 2x2 grid: this goes to bottom right (ax4), otherwise ax3
-    heatmap_ax = ax4 if (dataset_id in ["boston", "housing", "diabetes"] and has_small_coefs) else ax3
+    # --- (D) Small coefficients heatmap (best-F1 run) ---
+    if ax4 is not None and dataset_key in ["boston", "housing", "diabetes"]:
+        # Get small coefficients indices
+        small_coef_indices = get_small_coefficients_indices(dd, dataset_key, feature_names)
+        create_small_coefficients_heatmap(ax4, dd, feature_names, small_coef_indices)
     
-    if heatmap_ax is not None and has_small_coefs and small_coef_indices:
-        heatmap_data = []
-        for method in ['Lasso', 'NIMO']:
-            # pick the best F1 iteration for this method
-            method_rows = dd[dd['model_name'] == method]
-            if method_rows.empty:
-                continue
-            best_row = method_rows.loc[method_rows['f1'].idxmax()]
-
-            info, _ = destring_coeff(best_row)
-            if info is not None and info["values"] is not None:
-                try:
-                    beta_raw = to_raw_beta(info)
-                    for j in small_coef_indices:
-                        heatmap_data.append({
-                            'method': method,
-                            'feature': feature_names[j],
-                            'value': beta_raw[j]
-                        })
-                except Exception as e:
-                    print(f"Warning: Could not process coefficients for {method} in best iteration: {e}")
-                    continue
-
-        if heatmap_data:
-            heatmap_df = pd.DataFrame(heatmap_data)
-            heatmap_pivot = heatmap_df.pivot(index='method', columns='feature', values='value')
-
-            # Transpose the heatmap for horizontal arrangement (features as rows, methods as columns)
-            heatmap_pivot_t = heatmap_pivot.T
-
-            sns.heatmap(
-                heatmap_pivot_t, annot=True, fmt='.3f', cmap='RdBu_r', center=0,
-                ax=heatmap_ax, cbar_kws={'shrink': 0.8}
-            )
-            heatmap_ax.set_title('Small Coefficients (best iteration)', fontsize=TITLE_SIZE)
-            heatmap_ax.set_xlabel('Method')
-            heatmap_ax.set_ylabel('Feature')
-        else:
-            heatmap_ax.text(0.5, 0.5, "No small coefficient data available", 
-                     ha="center", va="center", transform=heatmap_ax.transAxes)
-            heatmap_ax.axis("off")
-    elif heatmap_ax is not None:
-        heatmap_ax.text(0.5, 0.5, "No small coefficient data available", 
-                ha="center", va="center", transform=heatmap_ax.transAxes)
-        heatmap_ax.axis("off")
-    
-    # Adjust layout based on whether we have heatmap
-    if has_small_coefs:
-        fig.subplots_adjust(left=0.08, right=0.99, top=0.85, bottom=0.12, wspace=0.25)
-    else:
-        fig.subplots_adjust(left=0.08, right=0.99, top=0.85, bottom=0.12, wspace=0.25)
+    # Adjust layout
+    fig.subplots_adjust(left=0.08, right=0.99, top=0.85, bottom=0.12, wspace=0.25)
     
     # Always save the plot when run
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight', transparent=True)
         print(f"✓ Real dataset plot saved to {save_path}")
     else:
-        default_path = f"dataset_{dataset_id}_real.png"
+        # Sanitize dataset name for filename
+        safe_name = re.sub(r'[^A-Za-z0-9._-]+', '_', dataset_key)
+        default_path = f"dataset_{safe_name}_real.png"
         plt.savefig(default_path, dpi=300, bbox_inches='tight', transparent=True)
         print(f"✓ Real dataset plot saved to {default_path}")
     
@@ -897,9 +780,11 @@ def main():
     results_path = '../../../results/real/experiment_results.csv'
     df = pd.read_csv(results_path)
     
-    # Filter to real datasets only
-    real_datasets = sorted(df['dataset_id'].unique().tolist())
-    df_real = df[df['dataset_id'].isin(real_datasets)].copy()
+    # Filter to real datasets only - use dataset_description for actual dataset names
+    # The data has both dataset_name='moon' and dataset_name='real' with dataset_description='moon'
+    # We want to group by the actual dataset names in dataset_description
+    real_datasets = sorted(df['dataset_description'].unique().tolist())
+    df_real = df[df['dataset_description'].isin(real_datasets)].copy()
     
     print(f"Loaded {len(df_real)} real dataset experiments")
     print(f"Methods: {df_real['model_name'].unique()}")
@@ -910,7 +795,7 @@ def main():
     
     for dataset in real_datasets:
         try:
-            save_path = f"dataset_{dataset}_real.png"
+            save_path = f"dataset_{get_canonical_dataset_key(dataset)}_real.png"
             fig = create_real_plot(dataset, df_real, save_path=save_path)
             saved_plots.append(save_path)
         except Exception as e:
