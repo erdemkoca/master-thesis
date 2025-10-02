@@ -411,6 +411,54 @@ def create_final_plot(scenario_id, df_synthetic, save_path=None):
                     fmt="none", ecolor="black", elinewidth=0.7, capsize=2
                 )
         
+        # Add thick red lines for best iteration values
+        if method_betas:
+            # Get best F1 iteration for each method
+            best_iteration_values = {}
+            for method in ['Lasso', 'NIMO']:
+                if method in method_betas:
+                    method_rows = dd[dd['model_name'] == method]
+                    if not method_rows.empty:
+                        best_row = method_rows.loc[method_rows['f1'].idxmax()]
+                        info, _ = destring_coeff(best_row)
+                        if info is not None and info["values"] is not None:
+                            try:
+                                beta_raw = to_raw_beta(info)
+                                best_iteration_values[method] = beta_raw
+                            except Exception as e:
+                                print(f"Warning: Could not process best iteration coefficients for {method}: {e}")
+                                continue
+            
+            # Add intercept values for best iteration
+            if 'Lasso' in best_iteration_values:
+                for _, row in dd[dd['model_name'] == 'Lasso'].iterrows():
+                    info, _ = destring_coeff(row)
+                    if info is not None:
+                        best_iteration_values['Lasso'] = np.concatenate([[info.get('intercept', 0.0)], best_iteration_values['Lasso']])
+                        break
+            
+            if 'NIMO' in best_iteration_values:
+                for _, row in dd[dd['model_name'] == 'NIMO'].iterrows():
+                    info, _ = destring_coeff(row)
+                    if info is not None:
+                        best_iteration_values['NIMO'] = np.concatenate([[info.get('intercept', 0.0)], best_iteration_values['NIMO']])
+                        break
+            
+            # Add ground truth intercept
+            best_iteration_values['GT'] = np.concatenate([[intercept_gt], beta_true[nz_idx]])
+            
+            # Draw red lines for best iteration values (excluding ground truth)
+            for i, m in enumerate(["GT","Lasso","NIMO"]):
+                if m in best_iteration_values and m != "GT":  # Skip ground truth
+                    # Calculate x positions (same as bars)
+                    x_positions = x + (i-1)*w
+                    # Get best iteration values for non-zero coefficients (including intercept)
+                    best_vals = best_iteration_values[m]
+                    # Draw red horizontal lines at the actual coefficient values
+                    for j, (x_pos, val) in enumerate(zip(x_positions, best_vals)):
+                        # Add horizontal line at the actual value (thinner)
+                        ax2.plot([x_pos-0.1, x_pos+0.1], [val, val], color='red', linewidth=2.5, alpha=0.9)
+        
         # Style the coefficient plot
         ax2.set_title("Non-zero coefficients (across iterations)", fontsize=TITLE_SIZE)
         ax2.set_ylabel("Coefficient", fontsize=TICK_SIZE)
@@ -431,13 +479,37 @@ def create_final_plot(scenario_id, df_synthetic, save_path=None):
             s.set_color('black')
             s.set_linewidth(1.2)
         
-        # legend a bit larger
-        ax2.legend(
-            frameon=True, fancybox=True, framealpha=0.9,
-            borderpad=0.4, handlelength=1.5, labelspacing=0.5,
-            prop={"size": 12},                 # bigger
-            loc="lower left", bbox_to_anchor=(0.01, 0.02), bbox_transform=ax2.transAxes
-        )
+        # Add red line explanation to the plot
+        ax2.text(0.02, 0.98, "Red lines: best iteration values", 
+                transform=ax2.transAxes, fontsize=10, 
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8, edgecolor="red"),
+                verticalalignment='top', horizontalalignment='left')
+        
+        # Scenario-specific legend positioning
+        if scenario_id == "B":
+            # Scenario B: legend in top right
+            ax2.legend(
+                frameon=True, fancybox=True, framealpha=0.9,
+                borderpad=0.4, handlelength=1.5, labelspacing=0.5,
+                prop={"size": 12},
+                loc="upper right", bbox_to_anchor=(0.98, 0.98), bbox_transform=ax2.transAxes
+            )
+        elif scenario_id == "C":
+            # Scenario C: legend in bottom right
+            ax2.legend(
+                frameon=True, fancybox=True, framealpha=0.9,
+                borderpad=0.4, handlelength=1.5, labelspacing=0.5,
+                prop={"size": 12},
+                loc="lower right", bbox_to_anchor=(0.98, 0.02), bbox_transform=ax2.transAxes
+            )
+        else:
+            # Default: legend in bottom left
+            ax2.legend(
+                frameon=True, fancybox=True, framealpha=0.9,
+                borderpad=0.4, handlelength=1.5, labelspacing=0.5,
+                prop={"size": 12},
+                loc="lower left", bbox_to_anchor=(0.01, 0.02), bbox_transform=ax2.transAxes
+            )
     else:
         ax2.text(0.5, 0.5, "No coefficient data available", 
                 ha="center", va="center", transform=ax2.transAxes)
