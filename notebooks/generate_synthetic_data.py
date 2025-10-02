@@ -14,14 +14,14 @@ from scipy.special import expit
 # ===== Distribution-based scenarios for method comparison =====
 SCENARIOS = {
     "A": {  # Linear baseline
-        "p": 5, "sigma": 0.1, "b0": 1.0,
+        "p": 7, "sigma": 0.1, "b0": 1.0,
         "beta": {0: 2.0, 1: -3.0, 2: 1.5, 3: -2.0},
         "nl": [],
         "dist": ("normal", 0, 1),
         "desc": "Scenario A: Purely linear baseline (N(0,1))"
     },
     "B": {  # Main effect + strong interaction
-        "p": 5, "sigma": 0.1, "b0": 0.5,
+        "p": 6, "sigma": 0.1, "b0": 0.5,
         # added x2 baseline as well
         "beta": {0: 1.5, 1: 2.5, 2: 0.5, 3: -0.5},
         "nl": [
@@ -30,29 +30,35 @@ SCENARIOS = {
         "dist": ("normal", 0, 1),
         "desc": "Scenario B: Main effect + strong x2*x3 interaction"
     },
-    "C": {
-      "p": 3, "sigma": 0.1, "b0": 1.0,
-      "beta": {0: 2.0, 1: -2.0},
-      "nl": [
-        ("main_int_tanh", 0, 1, 0.0,  4.0, 1.0),   # 4*x0*tanh(x1)
-        ("main_int_sin",  1, 0, 0.0, -6.0, 2.0),   # -6*x1*sin(2*x0)
-        ("main_int_tanh", 1, 0, 0.0, -2.0, 2.0)    # -2*x1*tanh(2*x0)
-      ],
-      "dist": ("uniform", -3, 3),
-      "desc": "Scenario C: matches screenshot equation"
+    "C": {  # like F just 15 features
+        "p": 15, "sigma": 0.1, "b0": 0.5,
+        "beta": {0: 1.0, 1: -1.0, 2: 0.5, 3: -0.5, 4: 1.0},
+        "nl": [
+
+            ("main_int_linear", 0, 1, 0.0, 16.0),
+
+
+            ("main_int_linear", 0, 2, 0.0, 13.0),
+
+
+            ("main_int_linear", 0, 3, 0.0, 11.0),
+
+        ],
+        "dist": ("normal", 0, 1),
+        "desc": "Scenario F: High-dimensional (p=20) with four interaction pairs (x1–x8), rest are noise."
     },
     "D": {
-        "p": 10, "sigma": 0.1, "b0": 5.0,  # constant +5
-        "beta": {0: 1.0, 1: 1.0, 2: -5.0, 3: 3.0},
+        "p": 10, "sigma": 0.1, "b0": 1.0,  # constant +5
+        "beta": {0: 1.0, 1: 1.0, 2: -2.0, 3: 1.5},
         "nl": [
-            # 10 * x1 * (1 + 2*tanh(2*x2))
+            # 2 * x1 * (1 + 2*tanh(2*x2))
             ("main_int_tanh", 0, 1, 0.0, 2.0, 2.0),
 
             # 10 * x1 * sin(x4)
             ("main_int_sin", 0, 3, 0.0, 10.0, 1.0),
 
-            # 20 * x2 * (1 + 2*cos(2*x1))
-            ("main_int_cos", 1, 0, 0.0, 2.0, 2.0),  # you'd need to add main_int_cos handler
+            # 2 * x2 * (1 + 2*cos(2*x1))
+            ("main_int_cos", 1, 0, 0.0, 2.0, 2.0),
 
             # -20 * x3 * (1 + 2*arctan(x2*x4))
             ("main_int_arctan_prod", 2, 1, 3, -20.0, 0.0, 2.0, 1.0)
@@ -62,7 +68,7 @@ SCENARIOS = {
         "desc": "Scenario D: Complex nonlinear interactions with tanh, sin, cos, arctan (with explicit linear betas)"
     },
     "E": {
-        "p": 3, "sigma": 0.1, "b0": 1.0,   # constant +1
+        "p": 15, "sigma": 0.1, "b0": 1.0,   # constant +1
         # true linear coefficients: x1=+1, x2=-2
         "beta": {0: 1.0, 1: -2.0},
 
@@ -79,8 +85,7 @@ SCENARIOS = {
 
         "dist": ("uniform", -3, 3),
         "desc": "Scenario E: linear x1=+1, x2=-2 with nonlinear interactions (tanh & sin)."
-    }
-
+    },
 }
 
 

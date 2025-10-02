@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Unified Experiment Runner
-Runs all methods on all datasets with consistent, fair evaluation
+Real Dataset Experiment Runner
+Runs all methods on real datasets only (boston, housing)
 """
 
 import pandas as pd
@@ -24,85 +24,35 @@ from methods.nimo_variants import run_nimo, run_nimo_baseline, run_nimo_transfor
 from methods.random_forest import run_random_forest
 from methods.neural_net import run_neural_net
 
+# =============================================================================
+# EXCLUSION LIST - Add dataset IDs here to exclude them from running
+# =============================================================================
+# Example: EXCLUDE_DATASETS = ["boston", "breast_cancer"]  # Exclude these datasets
+# Example: EXCLUDE_DATASETS = []  # Run all datasets
+EXCLUDE_DATASETS = []  # Exclude diabetes and moon, run boston and housing
 
-def discover_synthetic_scenarios(synthetic_data_path="../data/synthetic"):
+def get_real_datasets(exclude_datasets=None):
     """
-    Dynamically discover all available synthetic scenarios by scanning the data directory.
+    Get only real datasets from the registry, optionally excluding some.
 
     Args:
-        synthetic_data_path: Path to synthetic data directory
+        exclude_datasets: List of dataset IDs to exclude from running
 
     Returns:
-        list: List of discovered synthetic dataset configurations
+        list: List of real dataset configurations (excluding specified ones)
     """
-    synthetic_scenarios = []
-    data_path = Path(synthetic_data_path)
-
-    if not data_path.exists():
-        print(f"Warning: Synthetic data path {data_path} does not exist")
-        return []
-
-    # Look for scenario_* directories or files
-    pattern_files = list(data_path.glob("scenario_*_X_full.npy"))
-
-    for pattern_file in pattern_files:
-        # Extract scenario ID from filename (e.g., "scenario_A_X_full.npy" -> "A")
-        scenario_id = pattern_file.stem.split("_")[1]  # scenario_A_X_full -> A
-
-        # Check if all required files exist for this scenario
-        required_files = [
-            f"scenario_{scenario_id}_X_full.npy",
-            f"scenario_{scenario_id}_y_full.npy",
-            f"scenario_{scenario_id}_idx_pool.npy",
-            f"scenario_{scenario_id}_idx_test_big.npy",
-            f"scenario_{scenario_id}_metadata.json"
-        ]
-
-        all_files_exist = all((data_path / f).exists() for f in required_files)
-
-        if all_files_exist:
-            # Create dataset configuration
-            scenario_config = {
-                "kind": "synthetic",
-                "id": scenario_id,
-                "path": str(data_path),
-                "n_train": 1400,  # Default values
-                "n_val": 600,
-                "desc": f"Synthetic scenario {scenario_id} (auto-discovered)"
-            }
-            synthetic_scenarios.append(scenario_config)
-            print(f"  ✓ Discovered synthetic scenario: {scenario_id}")
-        else:
-            print(f"  ✗ Incomplete scenario {scenario_id}: missing required files")
-
-    # Sort by scenario ID for consistent ordering
-    synthetic_scenarios.sort(key=lambda x: x["id"])
-
-    print(f"Discovered {len(synthetic_scenarios)} synthetic scenarios: {[s['id'] for s in synthetic_scenarios]}")
-    return synthetic_scenarios
-
-
-def get_all_datasets():
-    """
-    Get all datasets including dynamically discovered synthetic scenarios.
-
-    Returns:
-        list: Combined list of real datasets and discovered synthetic scenarios
-    """
-    # Get real datasets from registry
+    if exclude_datasets is None:
+        exclude_datasets = []
+    
     real_datasets = [d for d in DATASETS if d["kind"] == "real"]
-
-    # Discover synthetic scenarios dynamically
-    synthetic_datasets = discover_synthetic_scenarios()
-
-    # Combine real and synthetic datasets
-    all_datasets = synthetic_datasets + real_datasets
-
-    print(f"Total datasets: {len(all_datasets)} ({len(synthetic_datasets)} synthetic, {len(real_datasets)} real)")
-    return all_datasets
-
-
-# NIMO variants are now included explicitly in the methods list below
+    
+    # Filter out excluded datasets
+    if exclude_datasets:
+        real_datasets = [d for d in real_datasets if d["id"] not in exclude_datasets]
+        print(f"Excluding datasets: {exclude_datasets}")
+    
+    print(f"Found {len(real_datasets)} real datasets: {[d['id'] for d in real_datasets]}")
+    return real_datasets
 
 
 def run_all_methods(X_tr, y_tr, X_va, y_va, X_te, y_te, seed, feature_names, dataset_info=None):
@@ -176,26 +126,27 @@ def run_all_methods(X_tr, y_tr, X_va, y_va, X_te, y_te, seed, feature_names, dat
     return results
 
 
-def main(n_iterations=30, rebalance_config=None, output_dir="../results/all"):
+def main(n_iterations=30, rebalance_config=None, output_dir="../results/real", exclude_datasets=None):
     """
-    Main experiment runner.
+    Main experiment runner for real datasets only.
 
     Args:
         n_iterations: Number of iterations per dataset
         rebalance_config: Rebalancing configuration dict
         output_dir: Output directory for results
+        exclude_datasets: List of dataset IDs to exclude from running
     """
     # Default rebalancing config
     if rebalance_config is None:
         rebalance_config = {"mode": "undersample", "target_pos": 0.5}
 
-    # Get all datasets (including dynamically discovered synthetic scenarios)
-    all_datasets = get_all_datasets()
+    # Get only real datasets (excluding specified ones)
+    all_datasets = get_real_datasets(exclude_datasets)
 
     print("=" * 80)
-    print("UNIFIED EXPERIMENT RUNNER")
+    print("REAL DATASET EXPERIMENT RUNNER")
     print("=" * 80)
-    print(f"Datasets: {len(all_datasets)}")
+    print(f"Datasets: {len(all_datasets)} (real only)")
     print(f"Iterations per dataset: {n_iterations}")
     print(f"Rebalancing: {rebalance_config}")
     print(f"NIMO variants: nimo_transformer (updated), nimo_transformer_old (original)")
@@ -235,11 +186,6 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/all"):
 
             # Add unified scenario-like metadata for plotting compatibility
             scenario_descriptions = {
-                'A': 'Linear (low-dim, 20 features)',
-                'B': 'Linear (high-dim, 200 features)',
-                'C': 'Linear + univariate nonlinearity (low-dim, 20 features)',
-                'D': 'Linear + interactions + nonlinearity (high-dim, 200 features)',
-                'E': 'Purely nonlinear (medium-dim, 50 features)',
                 'breast_cancer': 'Breast Cancer Wisconsin (569 samples, 30 features)',
                 'pima': 'Pima Indians Diabetes (768 samples, 8 features)',
                 'bank_marketing': 'Bank Marketing (11,161 samples, 50 features)',
@@ -250,34 +196,16 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/all"):
             dataset_info.update({
                 "scenario": entry["id"],  # Use dataset_id as scenario
                 "scenario_description": scenario_descriptions.get(entry["id"], entry.get("desc", "")),
-                "scenario_title": f"Scenario {entry['id']}: {scenario_descriptions.get(entry['id'], entry.get('desc', ''))}"
+                "scenario_title": f"Dataset {entry['id']}: {scenario_descriptions.get(entry['id'], entry.get('desc', ''))}"
             })
 
-            # Add true support info for synthetic data
-            if entry["kind"] == "synthetic":
-                true_support = meta.get("true_support", [])
-                beta_nonzero = meta.get("beta_nonzero", {})
-                n_features = meta.get("p", len(true_support))
-                
-                # Create full-length beta_true vector
-                beta_true_full = [0.0] * n_features
-                for idx, val in beta_nonzero.items():
-                    if 0 <= int(idx) < n_features:
-                        beta_true_full[int(idx)] = float(val)
-                
-                dataset_info.update({
-                    "n_true_features": len(true_support),
-                    "true_support": json.dumps(true_support),
-                    "beta_true": json.dumps(beta_true_full),
-                    "b0_true": meta.get("b0", 0.0)
-                })
-            else:
-                # For real datasets, add empty true support info for plotting compatibility
-                dataset_info.update({
-                    "n_true_features": 0,
-                    "true_support": json.dumps([]),
-                    "beta_true": json.dumps([])
-                })
+            # For real datasets, add empty true support info for plotting compatibility
+            dataset_info.update({
+                "n_true_features": 0,
+                "true_support": json.dumps([]),
+                "beta_true": json.dumps([]),
+                "b0_true": 0.0
+            })
 
             # Run iterations
             for it in range(n_iterations):
@@ -349,7 +277,7 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/all"):
 
     # Print summary
     print("\n" + "=" * 80)
-    print("EXPERIMENT SUMMARY")
+    print("REAL DATASET EXPERIMENT SUMMARY")
     print("=" * 80)
     print(f"Total results: {len(all_results)}")
     print(f"Datasets processed: {len(all_datasets)}")
@@ -383,10 +311,10 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/all"):
         avg_f1 = successful_results['f1'].mean() if n_success > 0 and 'f1' in successful_results.columns else 0
         print(f"  {method_name}: {n_success}/{n_total} successful runs, avg F1: {avg_f1:.3f}")
 
-    print(f"\n✓ Experiment completed successfully!")
+    print(f"\n✓ Real dataset experiment completed successfully!")
     return df
 
 
 if __name__ == "__main__":
-    # Run with default settings
-    df = main(n_iterations=1)  # Start with 3 iterations for testing
+    # Run with default settings and exclusion list
+    df = main(n_iterations=20, exclude_datasets=EXCLUDE_DATASETS)  # Start with 1 iteration for testing

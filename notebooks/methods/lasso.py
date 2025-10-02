@@ -39,16 +39,11 @@ def run_lasso(
     ).fit(X_tr, y_train)
 
     # ---------------------------
-    # 3) Threshold from validation (fallback 0.5)
+    # 3) Fixed threshold (deactivated threshold selection to avoid overfitting)
     # ---------------------------
-    if X_va is not None and y_val is not None:
-        p_va = clf.predict_proba(X_va)[:, 1]
-        qs = np.linspace(0.0, 1.0, 101)
-        ths = np.unique(np.quantile(p_va, qs))
-        f1s = [f1_score(y_val, (p_va >= t).astype(int), zero_division=0) for t in ths]
-        best_thr = float(ths[int(np.argmax(f1s))])
-    else:
-        best_thr = 0.5
+    # Threshold selection often causes overfitting on small validation sets
+    # Using fixed threshold 0.5 for consistency and stability
+    best_thr = 0.5
 
     # ---------------------------
     # 4) Test predictions/metrics

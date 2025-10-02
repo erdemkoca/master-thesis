@@ -13,10 +13,10 @@ DATASETS = [
     {"kind": "synthetic", "id": "E", "path": "../data/synthetic", "n_train": 140, "n_val": 60, "desc": "Purely nonlinear (medium-dim) → Lasso scheitert, nur RF/NN/NIMO gewinnen"},
     
     # Real datasets
-    {"kind": "real", "id": "breast_cancer", "path": "../data/real/breast_cancer/processed", "n_train": 140, "n_val": 60, "desc": "Breast Cancer Wisconsin"},
-    {"kind": "real", "id": "pima", "path": "../data/real/pima/processed", "n_train": 140, "n_val": 60, "desc": "Pima Indians Diabetes"},
-    {"kind": "real", "id": "bank_marketing", "path": "../data/real/bank_marketing/processed", "n_train": 140, "n_val": 60, "desc": "Bank Marketing"},
-    {"kind": "real", "id": "adult_income", "path": "../data/real/adult_income/processed", "n_train": 140, "n_val": 60, "desc": "Adult Income"},
+    {"kind": "real", "id": "boston", "path": "../data/real/boston/processed", "n_train": 140, "n_val": 60, "desc": "Boston Housing (binary classification)"},
+    {"kind": "real", "id": "housing", "path": "../data/real/housing/processed", "n_train": 140, "n_val": 60, "desc": "California Housing (binary classification)"},
+    {"kind": "real", "id": "diabetes", "path": "../data/real/diabetes/processed", "n_train": 140, "n_val": 60, "desc": "Diabetes Progression (binary classification)"},
+    {"kind": "real", "id": "moon", "path": "../data/real/moon/processed", "n_train": 140, "n_val": 60, "desc": "Two-Moon Dataset (binary classification)"},
 ]
 
 def get_dataset_by_id(dataset_id):

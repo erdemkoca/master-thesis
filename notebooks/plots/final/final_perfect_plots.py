@@ -94,6 +94,73 @@ def mean_ci(x, axis=0, alpha=0.05):
     ci = se * 1.96  # 95% CI
     return mean, ci
 
+def standard_boxplot(ax, df, x="Method", y="F1", order=None, colors=None,
+                     title="Scenario — F1 over iterations", whis=1.5, width=0.85):
+    """
+    Standard boxplot with visible outliers.
+    Uses Matplotlib's boxplot for full control.
+    """
+    cats = order or sorted(df[x].unique().tolist())
+    data = [df.loc[df[x] == c, y].to_numpy() for c in cats]
+
+    bp = ax.boxplot(
+        data,
+        notch=False,              # ← turn off notches
+        widths=width,
+        whis=1.5,                 # ← standard Tukey definition
+        showmeans=False,
+        showfliers=True,
+        patch_artist=True,
+        flierprops=dict(marker="o", markersize=4, markerfacecolor="black",
+                        markeredgewidth=0, alpha=0.7),
+        medianprops=dict(color="black", linewidth=1.2),
+        whiskerprops=dict(linewidth=1.2),
+        capprops=dict(linewidth=1.2),
+    )
+
+    # Color each box
+    if colors:
+        for box, cat in zip(bp["boxes"], cats):
+            c = colors.get(cat, "#cccccc")
+            box.set_facecolor(c)
+            box.set_edgecolor("black")
+            box.set_linewidth(1.0)
+
+    # X ticks/labels
+    ax.set_xticks(np.arange(1, len(cats) + 1))
+    ax.set_xticklabels(cats, rotation=90, ha="right")
+
+    # Title/labels
+    ax.set_title(title, fontsize=14, pad=8)
+    ax.set_xlabel("")
+    ax.set_ylabel("Test F1", fontsize=12)
+
+    # Grid + frame + tickmarks
+    ax.set_axisbelow(True)
+    ax.yaxis.grid(True, linestyle="--", linewidth=1.0, color="#999999", alpha=0.7)
+    ax.xaxis.grid(False)
+    ax.tick_params(axis="both", which="both", direction="out", length=6, width=1.2)
+    for s in ax.spines.values():
+        s.set_color("black"); s.set_linewidth(1.2)
+
+    # Slight margin to reduce whitespace
+    ax.margins(x=0.02)
+
+def count_outliers_by_group(df, x="Method", y="F1", order=None, whis=1.5):
+    """Count outliers per group for diagnostic purposes."""
+    cats = order or sorted(df[x].unique().tolist())
+    out = {}
+    for c in cats:
+        v = df.loc[df[x]==c, y].to_numpy()
+        q1, q3 = np.percentile(v, [25, 75])
+        iqr = q3 - q1
+        if isinstance(whis, (int, float)):
+            low, high = q1 - whis*iqr, q3 + whis*iqr
+        else:
+            low, high = np.percentile(v, whis[0]), np.percentile(v, whis[1])
+        out[c] = int(((v < low) | (v > high)).sum())
+    return out
+
 def create_final_plot(scenario_id, df_synthetic, save_path=None):
     """Create the final perfect per-scenario figure."""
     
@@ -195,6 +262,9 @@ def create_final_plot(scenario_id, df_synthetic, save_path=None):
     gs = GridSpec(nrows=2, ncols=3, figure=fig, 
                  width_ratios=[1.1, 1.2, 1.2], height_ratios=[1.25, 0.95])
     
+    # Global figure title
+    fig.suptitle(f"Scenario {scenario_id}", fontsize=16, y=0.98)
+    
     # Left: F1 boxplot spans both rows
     ax1 = fig.add_subplot(gs[:, 0])
     
@@ -210,41 +280,18 @@ def create_final_plot(scenario_id, df_synthetic, save_path=None):
     present = [m for m in methods_order if m in set(f1_long['Method'])]
     df_plot = f1_long[f1_long['Method'].isin(present)].copy()
     
-    # Create boxplot
-    sns.boxplot(
-        data=df_plot,
-        x="Method",
-        y="F1",
-        order=present,
-        palette={k: BOX_COLORS[k] for k in present},
-        ax=ax1,
-        width=0.80,            # wider boxes → less gap
-        fliersize=2,
-        linewidth=1.0,
+    # Create standard boxplot with visible outliers
+    standard_boxplot(
+        ax1, df_plot, x="Method", y="F1", order=present,
+        colors={k: BOX_COLORS[k] for k in present},
+        title="F1 (across iterations)",
+        whis=1.5,          # standard Tukey definition
+        width=0.9          # make boxes a bit wider
     )
     
-    # Style the F1 boxplot
-    ax1.set_title(f"Scenario {scenario_id} — F1 over iterations", fontsize=TITLE_SIZE, pad=8)
-    ax1.set_xlabel("")
-    ax1.set_ylabel("Test F1", fontsize=TICK_SIZE)
-    
-    # grey dotted horizontal grid (like the right plot)
-    ax1.set_axisbelow(True)
-    ax1.yaxis.grid(True, linestyle="--", linewidth=1.0, color="#999999", alpha=0.7)
-    ax1.xaxis.grid(False)
-    
-    # stronger tick marks on both axes
-    ax1.tick_params(axis="both", which="both", direction="out", length=6, width=1.2, labelsize=TICK_SIZE)
-    
-    # rotate labels & tighten category spacing a touch
-    ax1.set_xticks(range(len(present)))
-    ax1.set_xticklabels(present, rotation=90, ha="right")
-    ax1.margins(x=0.02)   # tiny side margin to reduce whitespace
-    
-    # black frame (like right panel)
-    for s in ax1.spines.values():
-        s.set_color("black")
-        s.set_linewidth(1.2)
+    # Optional: Check outlier counts for diagnostic purposes
+    outlier_counts = count_outliers_by_group(df_plot, order=present, whis=1.5)
+    print(f"  - Outliers per method: {outlier_counts}")
     
     # --- (B) Non-zero coefficients bar+CI vs ground truth ---
     if len(nz_idx) > 0 and method_betas:
@@ -365,13 +412,13 @@ def create_final_plot(scenario_id, df_synthetic, save_path=None):
                 )
         
         # Style the coefficient plot
-        ax2.set_title("Non-zero coefficients", fontsize=TITLE_SIZE)
+        ax2.set_title("Non-zero coefficients (across iterations)", fontsize=TITLE_SIZE)
         ax2.set_ylabel("Coefficient", fontsize=TICK_SIZE)
         ax2.tick_params(axis="both", which="both", direction="out", length=6, width=1.2, labelsize=TICK_SIZE)
         
-        # grey dotted y-grid, fixed ticks if you like {-2, 0, 2}
-        from matplotlib.ticker import FixedLocator
-        ax2.yaxis.set_major_locator(FixedLocator([-2, 0, 2]))
+        # grey dotted y-grid, every 0.5 units
+        from matplotlib.ticker import MultipleLocator
+        ax2.yaxis.set_major_locator(MultipleLocator(0.5))
         ax2.yaxis.grid(True, linestyle="--", linewidth=1.0, color="#999999", alpha=0.7)
         ax2.xaxis.grid(False)
         
@@ -396,34 +443,44 @@ def create_final_plot(scenario_id, df_synthetic, save_path=None):
                 ha="center", va="center", transform=ax2.transAxes)
         ax2.axis("off")
     
-    # --- (C) Zero coefficients heatmap ---
-    if len(z_idx) > 0 and method_betas:
-        # Create heatmap data
+    # --- (C) Zero coefficients heatmap (best-F1 run) ---
+    if len(z_idx) > 0:
         heatmap_data = []
-        for method, betas in method_betas.items():
-            if method in ['Lasso', 'NIMO']:
-                mean_z, ci_z = mean_ci(betas[:, z_idx], axis=0)
-                for i, j in enumerate(z_idx):
-                    heatmap_data.append({
-                        'method': method.replace('_', ' ').title(),
-                        'feature': feature_names[j],
-                        'mean': mean_z[i],
-                        'ci': ci_z[i]
-                    })
-        
+        for method in ['Lasso', 'NIMO']:
+            # pick the best F1 iteration for this method
+            method_rows = dd[dd['model_name'] == method]
+            if method_rows.empty:
+                continue
+            best_row = method_rows.loc[method_rows['f1'].idxmax()]
+
+            info, _ = destring_coeff(best_row)
+            if info is not None and info["values"] is not None:
+                try:
+                    beta_raw = to_raw_beta(info)
+                    for j in z_idx:
+                        heatmap_data.append({
+                            'method': method,
+                            'feature': feature_names[j],
+                            'value': beta_raw[j]
+                        })
+                except Exception as e:
+                    print(f"Warning: Could not process coefficients for {method} in best iteration: {e}")
+                    continue
+
         if heatmap_data:
             heatmap_df = pd.DataFrame(heatmap_data)
-            heatmap_pivot = heatmap_df.pivot(index='method', columns='feature', values='mean')
-            
-            # Create heatmap
-            sns.heatmap(heatmap_pivot, annot=True, fmt='.3f', cmap='RdBu_r', center=0,
-                       ax=ax3, cbar_kws={'shrink': 0.8})
-            ax3.set_title('True zero coefficients: estimates (mean ± 95% CI)')
+            heatmap_pivot = heatmap_df.pivot(index='method', columns='feature', values='value')
+
+            sns.heatmap(
+                heatmap_pivot, annot=True, fmt='.3f', cmap='RdBu_r', center=0,
+                ax=ax3, cbar_kws={'shrink': 0.8}
+            )
+            ax3.set_title('Zero Coefficients (best-F1 run)', fontsize=TITLE_SIZE)
             ax3.set_xlabel('Feature')
             ax3.set_ylabel('Method')
         else:
             ax3.text(0.5, 0.5, "No zero coefficient data available", 
-                    ha="center", va="center", transform=ax3.transAxes)
+                     ha="center", va="center", transform=ax3.transAxes)
             ax3.axis("off")
     else:
         ax3.text(0.5, 0.5, "No zero coefficient data available", 
@@ -431,7 +488,7 @@ def create_final_plot(scenario_id, df_synthetic, save_path=None):
         ax3.axis("off")
     
     # Adjust layout
-    fig.subplots_adjust(left=0.08, right=0.99, top=0.88, bottom=0.12, wspace=0.35, hspace=0.42)
+    fig.subplots_adjust(left=0.08, right=0.99, top=0.85, bottom=0.12, wspace=0.35, hspace=0.42)
     
     # Always save the plot when run
     if save_path:
@@ -451,19 +508,19 @@ def main():
     print("This will create the same perfect plots I see in windows!")
     
     # Load data
-    results_path = '../../../results/all/experiment_results.csv'
+    results_path = '../../../results/synthetic/experiment_results.csv'
     df = pd.read_csv(results_path)
     
-    # Filter for synthetic datasets
-    synthetic_datasets = ['A', 'B', 'C', 'D', 'E']
+    # Filter dynamically from whatever is in the results file
+    synthetic_datasets = sorted(df['dataset_id'].unique().tolist())
     df_synthetic = df[df['dataset_id'].isin(synthetic_datasets)].copy()
     
     print(f"Loaded {len(df_synthetic)} synthetic experiments")
     print(f"Methods: {df_synthetic['model_name'].unique()}")
     print(f"Scenarios: {synthetic_datasets}")
     
-    # Generate all plots
-    scenarios = ['A', 'B', 'C', 'D', 'E']
+    # Generate all plots dynamically
+    scenarios = synthetic_datasets
     saved_plots = []
     
     for scenario in scenarios:
