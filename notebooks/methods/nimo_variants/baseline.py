@@ -61,8 +61,9 @@ def add_self_features(
     Returns (X_expanded, mapping) where mapping holds (orig_col_idx, transform_name)
     """
     if self_features is None:
-        # DEFAULT: enable a strong but compact set
-        self_features = ["x2", "sin", "tanh", "arctan"]
+        # DEFAULT: DISABLED to avoid self-feature leak (paper compliance)
+        # Enable only if you understand the implications and fix CO masking
+        self_features = []
 
     if not self_features:
         return X.astype(np.float32), []
@@ -95,6 +96,41 @@ def add_self_features(
     return X_new, mapping
 
 
+def build_CO_with_derivatives(p_raw: int, mapping: List[Tuple[int, str]], n_bits: int) -> np.ndarray:
+    """
+    Build CO mask that properly handles self-feature leak by masking derived features.
+    
+    Args:
+        p_raw: Number of original features
+        mapping: List of (orig_col_idx, transform_name) for derived features
+        n_bits: Number of positional encoding bits
+        
+    Returns:
+        CO: (p, p + n_bits) mask where p = p_raw + len(mapping)
+    """
+    p = p_raw + len(mapping)
+    CO = np.ones((p, p + n_bits), dtype=np.float32)
+    
+    # For each raw feature j, find all derived columns that come from j
+    derived_by_raw = {j: [] for j in range(p_raw)}
+    for k, (j, _) in enumerate(mapping, start=p_raw):
+        derived_by_raw[j].append(k)
+    
+    # Zero out self and derived features when querying g_u_j for raw features
+    for j in range(p_raw):
+        CO[j, j] = 0.0  # zero self
+        for k in derived_by_raw[j]:
+            CO[j, k] = 0.0  # zero derived features from j
+    
+    # For derived features, zero self and progenitor raw column
+    for k in range(p_raw, p):
+        CO[k, k] = 0.0  # zero self
+        j = mapping[k - p_raw][0]  # progenitor raw column
+        CO[k, j] = 0.0  # zero progenitor
+    
+    return CO
+
+
 class DictDataset(torch.utils.data.Dataset):
     def __init__(self, features: torch.Tensor, targets: torch.Tensor):
         self.features = features
@@ -120,26 +156,26 @@ class AdaptiveRidgeLogisticRegression(L.LightningModule):
         input_dim: int,
         output_dim: int = 1,
         learning_rate: float = 3e-4,
-        lasso_penalty: float = 0.01,
         group_penalty: float = 1.0,
-        lasso_norm: float = 0.5,
-        group_norm: float = 0.25,
         dropout: float = 0.0,
         hidden_dim: Optional[int] = None,
         noise_std: float = 0.2,
+        lambda_reg: float = 1e-3,  # Explicit λ regularization
+        c_penalty: float = 0.01,   # Quadratic penalty on c
     ):
         super().__init__()
+        # Disable automatic optimization for manual control
+        self.automatic_optimization = False
 
         self.input_dim = int(input_dim)
         self.output_dim = int(output_dim)
         self.lr = float(learning_rate)
 
-        self.lasso_penalty = float(lasso_penalty)
         self.group_penalty = float(group_penalty)
-        self.lasso_norm = float(lasso_norm)
-        self.group_norm = float(group_norm)
         self.dropout = float(dropout)
         self.noise_std = float(noise_std)
+        self.lambda_reg = float(lambda_reg)
+        self.c_penalty = float(c_penalty)
 
         self.save_hyperparameters()
 
@@ -147,7 +183,7 @@ class AdaptiveRidgeLogisticRegression(L.LightningModule):
         self.n_bits = int(np.floor(np.log2(self.input_dim))) + 1
         bin_map = np.vstack([to_bin(i, self.n_bits) for i in range(1, self.input_dim + 1)])  # (p, n_bits)
 
-        # CO: mask-out self + append positional bits
+        # CO: mask-out self + append positional bits (will be updated if self-features are used)
         CO = np.ones((self.input_dim, self.input_dim), dtype=np.float32)
         np.fill_diagonal(CO, 0.0)
         CO = np.hstack([CO, bin_map.astype(np.float32)])  # (p, p + n_bits)
@@ -155,11 +191,15 @@ class AdaptiveRidgeLogisticRegression(L.LightningModule):
         # Register buffers so Lightning moves devices
         self.register_buffer("CO", torch.from_numpy(CO))                  # (p, p+n_bits)
         self.register_buffer("beta", torch.randn(self.input_dim) * 0.1)   # (p,)
+        self.register_buffer("beta_0", torch.randn(1) * 0.1)              # (1,)
 
         # Trainable scalars / vectors
-        self.beta_0 = nn.Parameter(torch.randn(1) * 0.1)
-        self.c = nn.Parameter(torch.ones(self.input_dim) * 0.1)
+        # Use softplus to enforce c_i > 0 constraint
+        self.rho = nn.Parameter(torch.ones(self.input_dim) * 0.1)  # log-space parameter
         self.alpha2 = nn.Parameter(torch.tensor(2.0))
+        
+        # Store mapping for self-features (if any)
+        self.self_feature_mapping = []
 
         # MLP definition
         in1 = self.input_dim + self.n_bits
@@ -177,6 +217,21 @@ class AdaptiveRidgeLogisticRegression(L.LightningModule):
 
         # vmap availability
         self._use_vmap = hasattr(torch, "vmap")
+    
+    def update_CO_mask(self, mapping: List[Tuple[int, str]]):
+        """Update CO mask to handle self-feature leak properly."""
+        if not mapping:
+            return  # No self-features, keep original CO
+        
+        self.self_feature_mapping = mapping
+        p_raw = self.input_dim - len(mapping)
+        CO_new = build_CO_with_derivatives(p_raw, mapping, self.n_bits)
+        self.register_buffer("CO", torch.from_numpy(CO_new))
+    
+    @property
+    def c(self):
+        """Get c = softplus(rho) to enforce c_i > 0."""
+        return torch.nn.functional.softplus(self.rho)
 
     def forward_MLP(self, X: torch.Tensor) -> torch.Tensor:
         """
@@ -264,6 +319,13 @@ class AdaptiveRidgeLogisticRegression(L.LightningModule):
         p = self.input_dim
         self.A_sum = torch.zeros(p, p, device=self.device, dtype=self.beta.dtype)
         self.b_sum = torch.zeros(p, device=self.device, dtype=self.beta.dtype)
+        self.W_sum = torch.zeros(1, device=self.device, dtype=self.beta.dtype)  # For intercept
+        self.sx_sum = torch.zeros(p, device=self.device, dtype=self.beta.dtype)  # Cross terms
+        self.wz_sum = torch.zeros(1, device=self.device, dtype=self.beta.dtype)  # Intercept RHS
+        
+        # Cache for gradient-enabled recomputation
+        self.X_cache = None
+        self.y_cache = None
 
     def training_step(self, batch, batch_idx):
         x = batch['features']
@@ -275,41 +337,101 @@ class AdaptiveRidgeLogisticRegression(L.LightningModule):
         # Main loss for NN params
         bce_loss = nn.BCEWithLogitsLoss()(y_hat, y)
 
-        # Regularizers
-        lasso_loss = self.lasso_penalty * torch.sum((self.c.abs() ** 2) ** self.lasso_norm)
+        # Corrected regularizers (paper-compliant)
+        c_vals = self.c  # c_i > 0 via softplus
+        c_penalty_loss = self.c_penalty * torch.sum(c_vals ** 2)  # Quadratic penalty on c
+        
+        # Group penalty: L2 norm on first layer input columns (paper-compliant)
         group_cols = self.fc1.weight[:, :self.input_dim]
-        group_loss = self.group_penalty * torch.sum(torch.norm(group_cols, dim=0) ** self.group_norm)
-        loss = bce_loss + lasso_loss + group_loss
+        group_loss = self.group_penalty * torch.sum(torch.norm(group_cols, dim=0))  # L2 norm
+        
+        loss = bce_loss + c_penalty_loss + group_loss
 
-        # Accumulate stabilized IRLS
-        with torch.no_grad():
-            pi = 0.999 * torch.sigmoid(y_hat) + 0.0005
-            w = (pi * (1.0 - pi)).clamp_min(1e-3)  # stability
-            c_pos = self.c.abs()
+        # Cache data for gradient-enabled recomputation (store small subset)
+        if batch_idx == 0:  # Store first batch of each epoch
+            self.X_cache = x.detach().clone()
+            self.y_cache = y.detach().clone()
 
-            X_tilde = B_u * c_pos  # (B, p)
-            self.A_sum.add_((X_tilde * w.unsqueeze(1)).T @ X_tilde)
-            q = y_hat + (y - pi) / w
-            self.b_sum.add_((X_tilde * w.unsqueeze(1)).T @ q)
+        # Manual optimization step
+        opt = self.optimizers()
+        opt.zero_grad(set_to_none=True)
+        self.manual_backward(loss)
+        opt.step()
 
         self.log('train_loss', loss, on_epoch=True, prog_bar=True, on_step=False)
-        return loss
+        # IMPORTANT: return None when using manual optimization
+        return None
 
     def on_train_epoch_end(self):
+        """Differentiable IRLS solve with proper gradient flow - paper-compliant adaptive ridge."""
+        if self.X_cache is None or self.y_cache is None:
+            return  # No cached data available
+        
+        # Recompute IRLS system with gradients enabled (key fix!)
+        X = self.X_cache
+        y = self.y_cache
+        
+        B_u = self.build_B_u(X)  # depends on NN
+        c_vals = self.c  # softplus(rho)
+        X_tilde = B_u * c_vals
+        
+        # Current logits with the running beta buffers (stop grads through beta buffers only)
+        logits = self.forward(B_u).detach()  # stop grads through beta buffers only
+        pi = 0.999 * torch.sigmoid(logits) + 0.0005
+        w = (pi * (1.0 - pi)).clamp_min(1e-3)
+        z = logits + (y - pi) / w
+        
+        # Build A_full, b_full from X_tilde, w, z (no no_grad here!)
+        B1 = torch.cat([torch.ones(X_tilde.size(0), 1, device=self.device), X_tilde], dim=1)  # (B, p+1)
+        
+        # Blocks:
+        A11 = (w.unsqueeze(1) * X_tilde).T @ X_tilde  # (p, p)
+        A10 = (w.unsqueeze(1) * X_tilde).sum(dim=0, keepdim=True).T  # (p, 1)
+        A00 = w.sum(dim=0, keepdim=True)  # (1,)
+        b1 = (w.unsqueeze(1) * X_tilde).T @ z  # (p,)
+        b0 = (w * z).sum(dim=0, keepdim=True)  # (1,)
+        
+        eye = torch.eye(self.input_dim, device=self.device, dtype=B1.dtype)
+        A_full = torch.zeros(self.input_dim + 1, self.input_dim + 1, device=self.device, dtype=B1.dtype)
+        A_full[0, 0] = A00
+        A_full[0, 1:] = A10.T
+        A_full[1:, 0] = A10.squeeze(1)
+        A_full[1:, 1:] = A11 + self.lambda_reg * eye
+        b_full = torch.cat([b0, b1], dim=0)
+        
+        # Differentiable solve (gamma_full depends on B_u and c!)
+        try:
+            gamma_full = torch.linalg.solve(A_full, b_full)
+        except RuntimeError:
+            # Add regularization to diagonal if singular
+            A_full += 1e-3 * torch.eye(self.input_dim + 1, device=self.device, dtype=B1.dtype)
+            gamma_full = torch.linalg.solve(A_full, b_full)
+        
+        # Profile logits built from the profiled solution
+        X1 = torch.cat([torch.ones(X_tilde.size(0), 1, device=self.device), X_tilde], dim=1)
+        logits_profile = X1 @ gamma_full  # Uses solved gamma_full (no detach!)
+        
+        # Profile loss drives learning via the solved coefficients
+        profile_loss = nn.BCEWithLogitsLoss()(logits_profile, y)
+        reg = self.c_penalty * (self.c ** 2).sum() + self.group_penalty * torch.norm(self.fc1.weight[:, :self.input_dim], dim=0).sum()
+        total_profile_loss = profile_loss + reg
+        
+        # Manual optimization step for profile loss
+        opt = self.optimizers()
+        opt.zero_grad(set_to_none=True)
+        self.manual_backward(total_profile_loss)
+        opt.step()
+        
+        # Update buffers for inspection/inference (optional)
         with torch.no_grad():
-            p = self.input_dim
-            eye = torch.eye(p, device=self.device, dtype=self.beta.dtype)
-            A = self.A_sum + eye
-            c_pos = self.c.abs()
-            try:
-                gamma = torch.linalg.solve(A, self.b_sum)
-            except RuntimeError:
-                gamma = torch.linalg.solve(A + 1e-3 * eye, self.b_sum)
-            new_beta = c_pos * gamma
-            self.beta.copy_(new_beta)
-
+            self.beta_0.copy_(gamma_full[0:1])
+            self.beta.copy_((self.c * gamma_full[1:]).detach())
+        
+        # Logging
+        self.log('profile_loss', total_profile_loss, on_epoch=True, prog_bar=True)
         self.log('beta_0', self.beta_0, on_epoch=True, prog_bar=True)
         self.log('alpha2', self.alpha2, on_epoch=True, prog_bar=True)
+        self.log('c_mean', c_vals.mean(), on_epoch=True, prog_bar=True)
 
     # -------- eval / predict --------
 
@@ -345,7 +467,7 @@ class AdaptiveRidgeLogisticRegression(L.LightningModule):
             list(self.fc1.parameters())
             + list(self.fc2.parameters())
             + list(self.fc3.parameters())
-            + [self.beta_0, self.c, self.alpha2]
+            + [self.rho, self.alpha2]  # beta_0 is now a buffer, not a parameter
         )
         return torch.optim.Adam(params, lr=self.lr)
 
@@ -358,30 +480,29 @@ def run_nimo_baseline(
     X_columns: Optional[List[str]] = None,
     *,
     X_val=None, y_val=None,
-    max_epochs: int = 50,
+    max_epochs: int = 1000,
     batch_size: int = 64,
     learning_rate: float = 3e-4,
-    lasso_penalty: float = 0.01,
     group_penalty: float = 1.0,
-    lasso_norm: float = 0.5,
-    group_norm: float = 0.25,
     dropout: float = 0.0,
     hidden_dim: Optional[int] = None,
     standardize: bool = True,
     num_workers: int = 0,
-    self_features: Optional[List[str]] = None,   # default enabled below
+    self_features: Optional[List[str]] = None,   # default disabled for paper compliance
     early_stop_patience: Optional[int] = 10,
     noise_std: float = 0.2,
+    lambda_reg: float = 1e-3,
+    c_penalty: float = 0.01,
 ) -> Dict[str, Any]:
     """
     Train one NIMO config and evaluate. Returns standardized dict with metrics.
     Notes:
-      - Self-features default: ["x2","sin","tanh","arctan"]
+      - Self-features default: disabled for paper compliance
     """
 
-    # Default self-features if not specified
+    # Default self-features if not specified (disabled for paper compliance)
     if self_features is None:
-        self_features = ["x2", "sin", "tanh", "arctan"]
+        self_features = []
 
     torch.manual_seed(randomState)
     np.random.seed(randomState)
@@ -435,14 +556,17 @@ def run_nimo_baseline(
         input_dim=Xtr.shape[1],
         output_dim=1,
         learning_rate=learning_rate,
-        lasso_penalty=lasso_penalty,
         group_penalty=group_penalty,
-        lasso_norm=lasso_norm,
-        group_norm=group_norm,
         dropout=dropout,
         hidden_dim=hidden_dim,
         noise_std=noise_std,
+        lambda_reg=lambda_reg,
+        c_penalty=c_penalty,
     )
+    
+    # Update CO mask if self-features were used
+    if mapping:
+        model.update_CO_mask(mapping)
 
     callbacks = []
     if early_stop_patience is not None and EarlyStopping is not None:
@@ -480,14 +604,29 @@ def run_nimo_baseline(
 
     # Final feature selection from beta
     beta_coeffs = model.beta.detach().cpu().numpy()
+    beta_0 = model.beta_0.detach().cpu().numpy().item()
     beta_threshold = 0.01
     if X_columns is not None and len(X_columns) == model.input_dim:
         selected_features = [X_columns[i] for i, b in enumerate(beta_coeffs) if abs(b) > beta_threshold]
+        feature_names = X_columns
     else:
         selected_features = [i for i, b in enumerate(beta_coeffs) if abs(b) > beta_threshold]
+        feature_names = [f"feature_{i}" for i in range(len(beta_coeffs))]
+
+    # Store coefficients in the same format as other methods
+    coefficients_data = {
+        "space": "standardized",
+        "intercept": float(beta_0),
+        "values": beta_coeffs.tolist(),
+        "values_no_threshold": beta_coeffs.tolist(),
+        "feature_names": feature_names,
+        "coef_threshold_applied": float(beta_threshold),
+        "mean": [0.0] * len(beta_coeffs),  # Assuming standardized data
+        "scale": [1.0] * len(beta_coeffs),  # Assuming standardized data
+    }
 
     result = {
-        'model_name': 'nimo_baseline',
+        'model_name': 'NIMO_MLP',
         'iteration': iteration,
         'random_seed': randomState,
         'f1': f1,
@@ -495,6 +634,7 @@ def run_nimo_baseline(
         'threshold': best_thr,
         'y_pred': y_pred.tolist(),
         'y_prob': probs_te.tolist(),
+        'coefficients': coefficients_data,
         'selected_features': selected_features,
         'n_selected': len(selected_features),
         'selection': {
@@ -505,15 +645,14 @@ def run_nimo_baseline(
             'max_epochs': int(max_epochs),
             'batch_size': int(batch_size),
             'learning_rate': float(learning_rate),
-            'lasso_penalty': float(lasso_penalty),
             'group_penalty': float(group_penalty),
-            'lasso_norm': float(lasso_norm),
-            'group_norm': float(group_norm),
             'dropout': float(dropout),
             'hidden_dim': hidden_dim,
             'standardize': bool(standardize),
             'self_features': self_features or [],
             'noise_std': float(noise_std),
+            'lambda_reg': float(lambda_reg),
+            'c_penalty': float(c_penalty),
         }
     }
     return standardize_method_output(result)
@@ -544,18 +683,19 @@ def run_nimo_grid(
       - Self-features default: ["x2","sin","tanh","arctan"]
     """
 
-    # Default self-features if not specified
+    # Default self-features if not specified (disabled for paper compliance)
     if self_features is None:
-        self_features = ["x2", "sin", "tanh", "arctan"]
+        self_features = []
 
-    # Default grid aligned with LassoNet-style path breadth
+    # Default grid aligned with NIMO paper parameters
     if grid is None:
         grid = {
             "learning_rate": [1e-3, 3e-4],
             "group_penalty": [0.1, 0.3, 1.0, 3.0],
-            "lasso_penalty": [1e-4, 1e-3, 1e-2, 5e-2],
             "dropout": [0.0, 0.2, 0.5],
             "hidden_dim": [64, 128, 256],
+            "lambda_reg": [1e-4, 1e-3, 1e-2],
+            "c_penalty": [1e-3, 1e-2, 1e-1],
         }
 
     keys = list(grid.keys())
@@ -576,15 +716,16 @@ def run_nimo_grid(
             max_epochs=max_epochs,
             batch_size=batch_size,
             learning_rate=h.get("learning_rate", 3e-4),
-            lasso_penalty=h.get("lasso_penalty", 1e-2),
             group_penalty=h.get("group_penalty", 1.0),
             dropout=h.get("dropout", 0.0),
             hidden_dim=h.get("hidden_dim", None),
             standardize=standardize,
             num_workers=num_workers,
-            self_features=self_features,         # default enabled
+            self_features=self_features,         # default disabled
             early_stop_patience=early_stop_patience,
             noise_std=noise_std,
+            lambda_reg=h.get("lambda_reg", 1e-3),
+            c_penalty=h.get("c_penalty", 0.01),
         )
 
         res['trial_hparams'] = h
