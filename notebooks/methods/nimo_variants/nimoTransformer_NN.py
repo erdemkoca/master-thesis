@@ -197,11 +197,17 @@ def update_beta_irls(
     y: torch.Tensor,
     lam_l2: float = 1e-3,
     tau_l1: float = 1e-3,
+    tau_l1_max: float = 5e-2,
     use_correction: bool = True,
     eps: float = 1e-6,
     trust_region: float = 0.5,
+    iteration: int = 0,
+    max_iterations: int = 25,
+    use_adaptive_l1: bool = True,
+    use_hard_thresholding: bool = True,
+    hard_threshold: float = 1e-6,
 ) -> None:
-    """Single IRLS step with elastic net style penalties and trust region."""
+    """Single IRLS step with elastic net style penalties, adaptive L1, and hard thresholding."""
     beta_prev = model.beta.detach().clone()
 
     feats, residual = model._build_features(X, use_correction)
@@ -219,8 +225,19 @@ def update_beta_irls(
     bvec = BW.t().matmul(target)
     beta_new = torch.linalg.solve(A, bvec)
 
+    # Adaptive L1 thresholding: increase penalty over time
+    if use_adaptive_l1 and max_iterations > 0:
+        progress = min(iteration / max_iterations, 1.0)
+        tau_l1_curr = tau_l1 + (tau_l1_max - tau_l1) * progress
+    else:
+        tau_l1_curr = tau_l1
+
     beta_np = beta_new.detach().cpu().numpy()
-    beta_np[1:] = np.sign(beta_np[1:]) * np.maximum(np.abs(beta_np[1:]) - tau_l1, 0.0)
+    beta_np[1:] = np.sign(beta_np[1:]) * np.maximum(np.abs(beta_np[1:]) - tau_l1_curr, 0.0)
+
+    # Hard thresholding: set very small coefficients to exactly zero
+    if use_hard_thresholding:
+        beta_np[1:] = np.where(np.abs(beta_np[1:]) < hard_threshold, 0.0, beta_np[1:])
 
     beta_tensor = torch.from_numpy(beta_np).to(B.device, dtype=B.dtype)
     delta = beta_tensor - beta_prev
@@ -240,10 +257,12 @@ class TrainingConfig:
     out_scale: float = 0.4
     residual_scale: float = 0.3
     lam_l2: float = 5e-2
-    tau_l1: float = 5e-3
+    tau_l1: float = 2e-2  # Increased from 5e-3 for stronger sparsity
+    tau_l1_max: float = 5e-2  # Maximum L1 penalty for adaptive thresholding
     lam_g: float = 2e-2
     lam_align: float = 1e-3
     lam_residual: float = 5e-4
+    lam_sparse_corr: float = 1e-3  # Additional sparsity regularization for corrections
     lr: float = 1e-3
     weight_decay: float = 1e-4
     T: int = 25
@@ -253,7 +272,10 @@ class TrainingConfig:
     use_no_harm: bool = True
     eps_g: float = 1e-3
     tau_beta_report: float = 0.0
-    trust_region: float = 0.5
+    trust_region: float = 1.0  # Increased to allow more aggressive updates
+    use_adaptive_l1: bool = True  # Enable adaptive L1 thresholding
+    use_hard_thresholding: bool = True  # Enable hard thresholding for exact zeros
+    hard_threshold: float = 1e-6  # Threshold below which coefficients are set to exactly zero
 
 
 def _default_config_grid(d: int) -> List[Tuple[str, TrainingConfig]]:
@@ -323,10 +345,35 @@ def _default_config_grid(d: int) -> List[Tuple[str, TrainingConfig]]:
         trust_region=1.8,
     )
 
+    # Add sparsity-focused configurations
+    sparse_base = replace(
+        base,
+        tau_l1=3e-2,
+        tau_l1_max=8e-2,
+        lam_sparse_corr=2e-3,
+        trust_region=1.5,
+        use_adaptive_l1=True,
+        use_hard_thresholding=True,
+        hard_threshold=1e-5,
+    )
+    
+    sparse_aggressive = replace(
+        aggressive,
+        tau_l1=4e-2,
+        tau_l1_max=1e-1,
+        lam_sparse_corr=3e-3,
+        trust_region=2.0,
+        use_adaptive_l1=True,
+        use_hard_thresholding=True,
+        hard_threshold=1e-6,
+    )
+
     configs: List[Tuple[str, TrainingConfig]] = [
         ("base", base),
         ("medium", medium),
         ("aggressive", aggressive),
+        ("sparse_base", sparse_base),
+        ("sparse_aggressive", sparse_aggressive),
     ]
 
     if d <= 4:
@@ -414,8 +461,14 @@ def _train_single(
             yt,
             lam_l2=cfg.lam_l2,
             tau_l1=cfg.tau_l1,
+            tau_l1_max=cfg.tau_l1_max,
             use_correction=False,
             trust_region=cfg.trust_region,
+            iteration=0,
+            max_iterations=cfg.T,
+            use_adaptive_l1=cfg.use_adaptive_l1,
+            use_hard_thresholding=cfg.use_hard_thresholding,
+            hard_threshold=cfg.hard_threshold,
         )
 
     loss_history = []
@@ -431,8 +484,14 @@ def _train_single(
             yt,
             lam_l2=cfg.lam_l2,
             tau_l1=cfg.tau_l1,
+            tau_l1_max=cfg.tau_l1_max,
             use_correction=True,
             trust_region=cfg.trust_region,
+            iteration=t,
+            max_iterations=cfg.T,
+            use_adaptive_l1=cfg.use_adaptive_l1,
+            use_hard_thresholding=cfg.use_hard_thresholding,
+            hard_threshold=cfg.hard_threshold,
         )
 
         lam_g_curr = cfg.lam_g * (0.3 + 0.7 * (1.0 - t / max(1, cfg.T - 1)))
@@ -449,8 +508,11 @@ def _train_single(
             align = cfg.lam_align * torch.mean(torch.abs((Xt * g_corr).mean(dim=0)))
             residual_out = model.residual_mlp(Xt).squeeze(-1)
             reg_residual = cfg.lam_residual * residual_out.abs().mean()
+            
+            # Additional sparsity regularization for corrections
+            reg_sparse_corr = cfg.lam_sparse_corr * torch.sum(torch.abs(g_corr))
 
-            loss = bce + reg_g + align + reg_residual
+            loss = bce + reg_g + align + reg_residual + reg_sparse_corr
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.correction_net.parameters(), max_norm=1.0)
             torch.nn.utils.clip_grad_norm_(model.residual_mlp.parameters(), max_norm=1.0)
