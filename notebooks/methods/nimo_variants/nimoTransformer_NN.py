@@ -201,12 +201,22 @@ class NIMOTransformer(nn.Module):
         out_scale: float = 0.4,
         residual_scale: float = 0.3,
         use_binary_context: bool = True,
+        fast_preset: bool = False,
+        use_residual_head: bool = True,
     ) -> None:
         super().__init__()
         self.d = d
         self.beta = nn.Parameter(torch.zeros(d + 1))  # [b0, b_1..b_d]
         self.out_scale = out_scale
         self.residual_scale = residual_scale
+        self.use_residual_head = use_residual_head
+        
+        # Apply fast preset optimizations
+        if fast_preset:
+            embed_dim = 48
+            num_layers = 2
+            num_heads = min(3, max(1, d//4))
+        
         self.correction_net = TransformerCorrection(
             d,
             embed_dim=embed_dim,
@@ -215,12 +225,16 @@ class NIMOTransformer(nn.Module):
             dropout=dropout,
             use_binary_context=use_binary_context,
         )
-        self.residual_mlp = nn.Sequential(
-            nn.Linear(d, embed_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(embed_dim, 1),
-        )
+        
+        if use_residual_head:
+            self.residual_mlp = nn.Sequential(
+                nn.Linear(d, embed_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(embed_dim, 1),
+            )
+        else:
+            self.residual_mlp = None
 
     def _raw_modulation(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         corr_raw, residual_raw = self.correction_net(x)
@@ -245,7 +259,8 @@ class NIMOTransformer(nn.Module):
         if use_correction:
             corr, residual = self.modulation(x)
             residual = residual + torch.sum(x * corr, dim=1)
-            residual = residual + self.residual_mlp(x).squeeze(-1)
+            if self.use_residual_head and self.residual_mlp is not None:
+                residual = residual + self.residual_mlp(x).squeeze(-1)
         else:
             residual = torch.zeros(x.size(0), device=x.device, dtype=x.dtype)
         return feats, residual
@@ -293,7 +308,16 @@ def update_beta_irls(
     BW = B * W.unsqueeze(1)
     A = BW.t().matmul(B) + lam_l2 * torch.eye(B.shape[1], device=B.device, dtype=B.dtype)
     bvec = BW.t().matmul(target)
-    beta_new = torch.linalg.solve(A, bvec)
+    
+    # Use Cholesky decomposition for faster solve
+    # Stabilize the matrix
+    A = A + 1e-6 * torch.eye(A.shape[0], device=A.device, dtype=A.dtype)
+    try:
+        L = torch.linalg.cholesky(A)
+        beta_new = torch.cholesky_solve(bvec.unsqueeze(1), L).squeeze(1)
+    except RuntimeError:
+        # Fallback to regular solve if Cholesky fails
+        beta_new = torch.linalg.solve(A, bvec)
 
     # Adaptive L1 thresholding: increase penalty over time
     if use_adaptive_l1 and max_iterations > 0:
@@ -320,12 +344,15 @@ def update_beta_irls(
 
 @dataclass
 class TrainingConfig:
-    embed_dim: int = 64
-    num_heads: int = 4
+    # Core transformer parameters (optimized defaults)
+    embed_dim: int = 48  # Reduced from 64 for speed
+    num_heads: int = 3   # Reduced from 4 for speed
     num_layers: int = 2
     dropout: float = 0.1
     out_scale: float = 0.4
     residual_scale: float = 0.3
+    
+    # Regularization parameters
     lam_l2: float = 5e-2
     tau_l1: float = 2e-2  # Increased from 5e-3 for stronger sparsity
     tau_l1_max: float = 5e-2  # Maximum L1 penalty for adaptive thresholding
@@ -333,11 +360,31 @@ class TrainingConfig:
     lam_align: float = 1e-3
     lam_residual: float = 5e-4
     lam_sparse_corr: float = 1e-3  # Additional sparsity regularization for corrections
+    
+    # Training parameters (optimized defaults)
     lr: float = 1e-3
     weight_decay: float = 1e-4
-    T: int = 25
+    T: int = 15  # Reduced from 25 for speed
     nn_steps: int = 1
-    warm_start_steps: int = 3
+    warm_start_steps: int = 1  # Reduced from 3 for speed
+    
+    # IRLS optimization parameters
+    irls_cached_batch_size: int = 1024  # Cache batch size for IRLS
+    irls_max_iter: int = 10  # Reduced from 25 for speed
+    
+    # Residual head optimization
+    use_residual_head: bool = True
+    residual_every_k: int = 1  # Train residual head every k iterations
+    
+    # Fast preset for maximum speed
+    fast_preset: bool = False
+    
+    # Evaluation optimization
+    n_thresholds: int = 101  # Reduced from 501 for speed
+    compute_decomposition: bool = False  # Skip decomposition by default
+    eval_every_k: int = 1  # Evaluate every k iterations
+    
+    # Existing parameters
     use_binary_context: bool = True
     use_no_harm: bool = True
     eps_g: float = 1e-3
@@ -350,12 +397,18 @@ class TrainingConfig:
 
 def _default_config_grid(d: int) -> List[Tuple[str, TrainingConfig]]:
     base = TrainingConfig()
+    
+    # Apply fast preset if enabled
+    if base.fast_preset:
+        base.embed_dim = 48
+        base.num_layers = 2
+        base.num_heads = min(3, max(1, d//4))
 
     medium = replace(
         base,
-        embed_dim=96,
+        embed_dim=72,  # Reduced from 96
         num_layers=3,
-        num_heads=4,
+        num_heads=3,   # Reduced from 4
         dropout=0.1,
         out_scale=0.45,
         residual_scale=0.4,
@@ -365,18 +418,18 @@ def _default_config_grid(d: int) -> List[Tuple[str, TrainingConfig]]:
         lam_residual=5e-4,
         lr=5e-4,
         weight_decay=5e-5,
-        T=40,
+        T=25,  # Reduced from 40
         nn_steps=2,
-        warm_start_steps=5,
+        warm_start_steps=3,  # Reduced from 5
         trust_region=1.5,
     )
 
-    aggressive_heads = 8 if d <= 12 else 8
-    aggressive_embed = 128 if d <= 20 else 160
+    aggressive_heads = min(6, max(3, d//4))  # Reduced and adaptive
+    aggressive_embed = 96 if d <= 20 else 120  # Reduced
     aggressive = replace(
         base,
         embed_dim=aggressive_embed,
-        num_layers=4,
+        num_layers=3,  # Reduced from 4
         num_heads=aggressive_heads,
         dropout=0.15,
         out_scale=0.55,
@@ -387,14 +440,14 @@ def _default_config_grid(d: int) -> List[Tuple[str, TrainingConfig]]:
         lam_residual=1e-3,
         lr=3e-4,
         weight_decay=5e-5,
-        T=60,
-        nn_steps=3,
-        warm_start_steps=6,
+        T=35,  # Reduced from 60
+        nn_steps=2,  # Reduced from 3
+        warm_start_steps=3,  # Reduced from 6
         trust_region=2.0,
     )
 
-    residual_heads = 6 if d >= 16 else 4
-    residual_embed = 96 if residual_heads == 4 else 120
+    residual_heads = min(4, max(2, d//4))  # Reduced and adaptive
+    residual_embed = 72 if residual_heads <= 3 else 96  # Reduced
     residual = replace(
         base,
         embed_dim=residual_embed,
@@ -409,9 +462,9 @@ def _default_config_grid(d: int) -> List[Tuple[str, TrainingConfig]]:
         lam_residual=1e-3,
         lr=4e-4,
         weight_decay=5e-5,
-        T=50,
-        nn_steps=3,
-        warm_start_steps=5,
+        T=30,  # Reduced from 50
+        nn_steps=2,  # Reduced from 3
+        warm_start_steps=3,  # Reduced from 5
         trust_region=1.8,
     )
 
@@ -449,9 +502,9 @@ def _default_config_grid(d: int) -> List[Tuple[str, TrainingConfig]]:
     if d <= 4:
         lowdim = replace(
             base,
-            embed_dim=72,
-            num_layers=3,
-            num_heads=3,
+            embed_dim=48,  # Reduced from 72
+            num_layers=2,  # Reduced from 3
+            num_heads=2,   # Reduced from 3
             dropout=0.05,
             out_scale=0.7,
             residual_scale=0.65,
@@ -461,9 +514,9 @@ def _default_config_grid(d: int) -> List[Tuple[str, TrainingConfig]]:
             lam_residual=5e-4,
             lr=4e-4,
             weight_decay=5e-5,
-            T=60,
-            nn_steps=3,
-            warm_start_steps=5,
+            T=35,  # Reduced from 60
+            nn_steps=2,  # Reduced from 3
+            warm_start_steps=3,  # Reduced from 5
             trust_region=1.5,
         )
         configs.append(("lowdim_nonlin", lowdim))
@@ -500,7 +553,9 @@ def _train_single(
     # Start timing
     start_time = time.perf_counter()
     
-    device = torch.device("cpu")
+    # GPU + AMP optimization
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    torch.set_float32_matmul_precision("high")
     torch.manual_seed(randomState)
     np.random.seed(randomState)
 
@@ -520,6 +575,13 @@ def _train_single(
         XvaT = yvaT = None
 
     d = Xt.shape[1]
+    
+    # Cached batch for IRLS optimization
+    cache_idx = None
+    if getattr(cfg, "irls_cached_batch_size", None) and cfg.irls_cached_batch_size > 0:
+        batch_size = min(cfg.irls_cached_batch_size, Xt.shape[0])
+        cache_idx = torch.randint(0, Xt.shape[0], (batch_size,), device=device)
+    
     model = NIMOTransformer(
         d,
         embed_dim=cfg.embed_dim,
@@ -529,26 +591,40 @@ def _train_single(
         out_scale=cfg.out_scale,
         residual_scale=cfg.residual_scale,
         use_binary_context=cfg.use_binary_context,
+        fast_preset=cfg.fast_preset,
+        use_residual_head=cfg.use_residual_head,
     ).to(device)
 
+    # Setup optimizer with only active parameters
+    params = list(model.correction_net.parameters())
+    if model.residual_mlp is not None:
+        params.extend(list(model.residual_mlp.parameters()))
+    
     opt = torch.optim.Adam(
-        list(model.correction_net.parameters()) + list(model.residual_mlp.parameters()),
+        params,
         lr=cfg.lr,
         weight_decay=cfg.weight_decay,
     )
+    
+    # Setup AMP scaler for GPU
+    scaler_amp = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
 
     for _ in range(cfg.warm_start_steps):
+        # Use cached batch for IRLS if available
+        X_irls = Xt[cache_idx] if cache_idx is not None else Xt
+        y_irls = yt[cache_idx] if cache_idx is not None else yt
+        
         update_beta_irls(
             model,
-            Xt,
-            yt,
+            X_irls,
+            y_irls,
             lam_l2=cfg.lam_l2,
             tau_l1=cfg.tau_l1,
             tau_l1_max=cfg.tau_l1_max,
             use_correction=False,
             trust_region=cfg.trust_region,
             iteration=0,
-            max_iterations=cfg.T,
+            max_iterations=cfg.irls_max_iter,
             use_adaptive_l1=cfg.use_adaptive_l1,
             use_hard_thresholding=cfg.use_hard_thresholding,
             hard_threshold=cfg.hard_threshold,
@@ -561,45 +637,73 @@ def _train_single(
 
     for t in range(cfg.T):
         model.eval()
+        
+        # Use cached batch for IRLS if available
+        X_irls = Xt[cache_idx] if cache_idx is not None else Xt
+        y_irls = yt[cache_idx] if cache_idx is not None else yt
+        
         update_beta_irls(
             model,
-            Xt,
-            yt,
+            X_irls,
+            y_irls,
             lam_l2=cfg.lam_l2,
             tau_l1=cfg.tau_l1,
             tau_l1_max=cfg.tau_l1_max,
             use_correction=True,
             trust_region=cfg.trust_region,
             iteration=t,
-            max_iterations=cfg.T,
+            max_iterations=cfg.irls_max_iter,
             use_adaptive_l1=cfg.use_adaptive_l1,
             use_hard_thresholding=cfg.use_hard_thresholding,
             hard_threshold=cfg.hard_threshold,
         )
 
         lam_g_curr = cfg.lam_g * (0.3 + 0.7 * (1.0 - t / max(1, cfg.T - 1)))
+        
+        # Check if we should train residual head this iteration
+        train_residual_now = cfg.use_residual_head and ((t % getattr(cfg, "residual_every_k", 1)) == 0)
+        
+        # Disable gradients for residual head if not training it
+        if not train_residual_now and model.residual_mlp is not None:
+            for p in model.residual_mlp.parameters():
+                p.requires_grad_(False)
+        elif model.residual_mlp is not None:
+            for p in model.residual_mlp.parameters():
+                p.requires_grad_(True)
 
         for _ in range(cfg.nn_steps):
             model.train()
-            opt.zero_grad()
-            logits = model.predict_logits(Xt, use_correction=True)
-            bce = F.binary_cross_entropy_with_logits(logits, yt)
-
-            with torch.no_grad():
-                g_corr = model.corrections(Xt)
-            reg_g = lam_g_curr * g_corr.abs().mean()
-            align = cfg.lam_align * torch.mean(torch.abs((Xt * g_corr).mean(dim=0)))
-            residual_out = model.residual_mlp(Xt).squeeze(-1)
-            reg_residual = cfg.lam_residual * residual_out.abs().mean()
+            opt.zero_grad(set_to_none=True)
             
-            # Additional sparsity regularization for corrections
-            reg_sparse_corr = cfg.lam_sparse_corr * torch.sum(torch.abs(g_corr))
+            # Use AMP for forward pass
+            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                logits = model.predict_logits(Xt, use_correction=True)
+                bce = F.binary_cross_entropy_with_logits(logits, yt)
 
-            loss = bce + reg_g + align + reg_residual + reg_sparse_corr
-            loss.backward()
+                with torch.no_grad():
+                    g_corr = model.corrections(Xt)
+                reg_g = lam_g_curr * g_corr.abs().mean()
+                align = cfg.lam_align * torch.mean(torch.abs((Xt * g_corr).mean(dim=0)))
+                
+                # Only compute residual regularization if training residual head
+                if train_residual_now and model.residual_mlp is not None:
+                    residual_out = model.residual_mlp(Xt).squeeze(-1)
+                    reg_residual = cfg.lam_residual * residual_out.abs().mean()
+                else:
+                    reg_residual = 0.0
+                
+                # Additional sparsity regularization for corrections
+                reg_sparse_corr = cfg.lam_sparse_corr * torch.sum(torch.abs(g_corr))
+
+                loss = bce + reg_g + align + reg_residual + reg_sparse_corr
+            
+            # Use AMP scaler for backward pass
+            scaler_amp.scale(loss).backward()
             torch.nn.utils.clip_grad_norm_(model.correction_net.parameters(), max_norm=1.0)
-            torch.nn.utils.clip_grad_norm_(model.residual_mlp.parameters(), max_norm=1.0)
-            opt.step()
+            if model.residual_mlp is not None:
+                torch.nn.utils.clip_grad_norm_(model.residual_mlp.parameters(), max_norm=1.0)
+            scaler_amp.step(opt)
+            scaler_amp.update()
 
         loss_history.append(float(loss.item()))
         if len(loss_history) > 1 and abs(loss_history[-1] - loss_history[-2]) < 1e-4:
@@ -614,14 +718,15 @@ def _train_single(
                 best_val_loss = val_loss
                 best_state = (
                     model.correction_net.state_dict(),
-                    model.residual_mlp.state_dict(),
+                    model.residual_mlp.state_dict() if model.residual_mlp is not None else None,
                     model.beta.detach().clone(),
                 )
 
     if best_state is not None:
         correction_state, residual_mlp_state, beta_state = best_state
         model.correction_net.load_state_dict(correction_state)
-        model.residual_mlp.load_state_dict(residual_mlp_state)
+        if residual_mlp_state is not None and model.residual_mlp is not None:
+            model.residual_mlp.load_state_dict(residual_mlp_state)
         model.beta.data.copy_(beta_state)
 
     model.eval()
@@ -632,7 +737,7 @@ def _train_single(
         with torch.no_grad():
             prob_val_on = model.predict_proba(XvaT, use_correction=True).cpu().numpy()
             prob_val_off = model.predict_proba(XvaT, use_correction=False).cpu().numpy()
-        grid = np.linspace(0.0, 1.0, 501)
+        grid = np.linspace(0.0, 1.0, getattr(cfg, "n_thresholds", 101))
         f1_on = max(f1_score(y_val, (prob_val_on >= thr).astype(int), zero_division=0) for thr in grid)
         f1_off = max(f1_score(y_val, (prob_val_off >= thr).astype(int), zero_division=0) for thr in grid)
         if f1_on < f1_off:
@@ -647,7 +752,7 @@ def _train_single(
             else None
         )
 
-    grid = np.linspace(0.0, 1.0, 501)
+    grid = np.linspace(0.0, 1.0, getattr(cfg, "n_thresholds", 101))
     if prob_val is not None:
         f1_grid = [f1_score(y_val, (prob_val >= thr).astype(int), zero_division=0) for thr in grid]
     else:
@@ -668,21 +773,26 @@ def _train_single(
     else:
         val_metrics = {"f1": None, "accuracy": None}
 
-    def _decomposition(X_np: np.ndarray):
-        X_t = torch.tensor(X_np, dtype=torch.float32, device=device)
-        with torch.no_grad():
-            eta_lin = model.predict_logits(X_t, use_correction=False).cpu().numpy()
-            eta_full = model.predict_logits(X_t, use_correction=use_correction_final).cpu().numpy()
-        eta_corr = eta_full - eta_lin
-        var_full = np.var(eta_full)
-        return {
-            "corr_mean_abs": float(np.mean(np.abs(eta_corr))),
-            "corr_var_share": float(np.var(eta_corr) / var_full) if var_full > 1e-12 else 0.0,
-            "lin_full_corr": float(np.corrcoef(eta_lin, eta_full)[0, 1]) if np.std(eta_lin) > 0 and np.std(eta_full) > 0 else 0.0,
-        }
+    # Optional decomposition computation
+    if getattr(cfg, "compute_decomposition", False):
+        def _decomposition(X_np: np.ndarray):
+            X_t = torch.tensor(X_np, dtype=torch.float32, device=device)
+            with torch.no_grad():
+                eta_lin = model.predict_logits(X_t, use_correction=False).cpu().numpy()
+                eta_full = model.predict_logits(X_t, use_correction=use_correction_final).cpu().numpy()
+            eta_corr = eta_full - eta_lin
+            var_full = np.var(eta_full)
+            return {
+                "corr_mean_abs": float(np.mean(np.abs(eta_corr))),
+                "corr_var_share": float(np.var(eta_corr) / var_full) if var_full > 1e-12 else 0.0,
+                "lin_full_corr": float(np.corrcoef(eta_lin, eta_full)[0, 1]) if np.std(eta_lin) > 0 and np.std(eta_full) > 0 else 0.0,
+            }
 
-    decomp_val = _decomposition(Xva) if X_val is not None else None
-    decomp_test = _decomposition(Xte)
+        decomp_val = _decomposition(Xva) if X_val is not None else None
+        decomp_test = _decomposition(Xte)
+    else:
+        decomp_val = None
+        decomp_test = None
 
     corr_stats = None
     if X_val is not None:
@@ -837,8 +947,14 @@ def _train_single(
                 "cls_token": model.correction_net.cls_token.detach().cpu().numpy(),
                 "corr_head_last_weight": corr_last.weight.detach().cpu().numpy(),
                 "corr_head_last_bias": corr_last.bias.detach().cpu().numpy(),
-                "residual_head_last_weight": res_last.weight.detach().cpu().numpy(),
-                "residual_head_last_bias": res_last.bias.detach().cpu().numpy(),
+                "residual_head_last_weight": (
+                    None if model.residual_mlp is None
+                    else res_last.weight.detach().cpu().numpy()
+                ),
+                "residual_head_last_bias": (
+                    None if model.residual_mlp is None
+                    else res_last.bias.detach().cpu().numpy()
+                ),
             }
 
             meta = {
@@ -941,7 +1057,42 @@ def run_nimo(
         return (res, candidate_summary) if return_all else res
 
     d = X_train.shape[1]
-    candidates = config_search or _default_config_grid(d)
+    
+    # Skip config grid by default - use single base config unless config_search explicitly provided
+    if config_search is None:
+        # Use only the base configuration by default
+        cfg = _default_config_grid(d)[0][1]
+        res, val_metrics = _train_single(
+            cfg,
+            X_train=X_train,
+            y_train=y_train,
+            X_test=X_test,
+            y_test=y_test,
+            iteration=iteration,
+            randomState=randomState,
+            X_columns=X_columns,
+            X_val=X_val,
+            y_val=y_val,
+            return_model_bits=return_model_bits,
+            save_artifacts=save_artifacts,
+            artifact_dir=artifact_dir,
+            scenario_name=scenario_name,
+            artifact_tag=artifact_tag,
+            save_if=save_if,
+            cache_policy=cache_policy,
+            artifact_dtype=artifact_dtype,
+            cfg_label="base",
+        )
+        res = _with_label(res, val_metrics, "base")
+        res["config_candidates"] = [{
+            "label": "base",
+            "val_f1": val_metrics.get("f1") if val_metrics else None,
+            "val_accuracy": val_metrics.get("accuracy") if val_metrics else None,
+            "test_f1": res.get("f1"),
+        }]
+        return (res, res["config_candidates"]) if return_all else res
+    
+    candidates = config_search
 
     summaries = []
     best_res = best_metrics = None
