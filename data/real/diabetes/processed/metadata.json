@@ -1,0 +1,22 @@
+{
+  "n_samples": 442,
+  "n_features": 10,
+  "feature_names": [
+    "age",
+    "sex",
+    "bmi",
+    "bp",
+    "s1",
+    "s2",
+    "s3",
+    "s4",
+    "s5",
+    "s6"
+  ],
+  "target_name": "diabetes_progression",
+  "positive_class": "High progression (\u2265median)",
+  "n_train": 353,
+  "n_test": 89,
+  "test_frac": 0.2,
+  "random_state": 42
+}

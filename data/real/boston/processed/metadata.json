@@ -1,0 +1,25 @@
+{
+  "n_samples": 506,
+  "n_features": 13,
+  "feature_names": [
+    "CRIM",
+    "ZN",
+    "INDUS",
+    "CHAS",
+    "NOX",
+    "RM",
+    "AGE",
+    "DIS",
+    "RAD",
+    "TAX",
+    "PTRATIO",
+    "B",
+    "LSTAT"
+  ],
+  "target_name": "MEDV",
+  "positive_class": "High value (\u2265median)",
+  "n_train": 404,
+  "n_test": 102,
+  "test_frac": 0.2,
+  "random_state": 42
+}

@@ -1,0 +1,20 @@
+{
+  "n_samples": 20640,
+  "n_features": 8,
+  "feature_names": [
+    "longitude",
+    "latitude",
+    "housing_median_age",
+    "total_rooms",
+    "total_bedrooms",
+    "population",
+    "households",
+    "median_income"
+  ],
+  "target_name": "housing_value",
+  "positive_class": "Expensive housing (\u2265median value)",
+  "n_train": 16512,
+  "n_test": 4128,
+  "test_frac": 0.2,
+  "random_state": 42
+}

@@ -1,0 +1,15 @@
+{
+  "n_samples": 1000,
+  "n_features": 2,
+  "feature_names": [
+    "X1",
+    "X2"
+  ],
+  "target_name": "moon_class",
+  "positive_class": "Moon class 1",
+  "n_train": 800,
+  "n_test": 200,
+  "test_frac": 0.2,
+  "random_state": 42,
+  "noise": 0.2
+}
