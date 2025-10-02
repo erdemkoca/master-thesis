@@ -8,6 +8,7 @@ from sklearn.model_selection import KFold
 from sklearn.metrics import f1_score
 from sklearn.preprocessing import StandardScaler
 import sys, os
+import time
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 try:
@@ -105,6 +106,9 @@ class AdvancedNN(nn.Module):
         return self.fc3(x)
 
 def run_neural_net(X_train, y_train, X_test, y_test, iteration, randomState, X_columns=None, X_val=None, y_val=None):
+    # Start timing
+    start_time = time.perf_counter()
+    
     torch.manual_seed(randomState)
     np.random.seed(randomState)
 
@@ -330,6 +334,10 @@ def run_neural_net(X_train, y_train, X_test, y_test, iteration, randomState, X_c
     accuracy = accuracy_score(y_test, y_pred)
     train_accuracy = accuracy_score(y_train, train_pred)
     
+    # End timing
+    end_time = time.perf_counter()
+    execution_time = end_time - start_time
+
     result = {
         'model_name': 'NN',
         'iteration': iteration,
@@ -344,6 +352,14 @@ def run_neural_net(X_train, y_train, X_test, y_test, iteration, randomState, X_c
         'selected_features': sel,
         'method_has_selection': False,
         'n_selected': len(sel),
-        'hyperparams': best_params
+        'hyperparams': best_params,
+        
+        # Timing information
+        'execution_time': execution_time,
+        'timing': {
+            'total_seconds': execution_time,
+            'start_time': start_time,
+            'end_time': end_time
+        }
     }
     return standardize_method_output(result)

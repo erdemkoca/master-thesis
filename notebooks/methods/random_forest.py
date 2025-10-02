@@ -1,4 +1,5 @@
 import numpy as np
+import time
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import f1_score, accuracy_score
 from sklearn.preprocessing import StandardScaler
@@ -30,6 +31,9 @@ except ImportError as e:
 
 
 def run_random_forest(X_train, y_train, X_test, y_test, iteration, randomState, X_columns=None, X_val=None, y_val=None):
+    # Start timing
+    start_time = time.perf_counter()
+    
     # Scaling wie bei Lasso (fairer Vergleich)
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
@@ -78,6 +82,10 @@ def run_random_forest(X_train, y_train, X_test, y_test, iteration, randomState, 
     selected_features = [X_columns[i] for i, imp in enumerate(importances) if imp > importance_threshold] \
         if X_columns is not None else []
 
+    # End timing
+    end_time = time.perf_counter()
+    execution_time = end_time - start_time
+
     result = {
         "model_name": "RF",
         "iteration": iteration,
@@ -98,6 +106,14 @@ def run_random_forest(X_train, y_train, X_test, y_test, iteration, randomState, 
             "max_features": rf.max_features,
             "oob_score": True
         },
-        "oob_score": rf.oob_score_
+        "oob_score": rf.oob_score_,
+        
+        # Timing information
+        "execution_time": execution_time,
+        "timing": {
+            "total_seconds": execution_time,
+            "start_time": start_time,
+            "end_time": end_time
+        }
     }
     return standardize_method_output(result)

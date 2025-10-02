@@ -1,5 +1,6 @@
 import numpy as np
 import json
+import time
 from lassonet import LassoNetClassifierCV
 from sklearn.metrics import f1_score, accuracy_score
 from sklearn.preprocessing import StandardScaler
@@ -29,6 +30,9 @@ except ImportError as e:
 def run_lassonet(X_train, y_train, X_test, y_test,
                  iteration, randomState, X_columns=None,
                  X_val=None, y_val=None):
+
+    # Start timing
+    start_time = time.perf_counter()
 
     # --- 1) Standardize data (fit on train only) ---
     scaler = StandardScaler()
@@ -144,6 +148,14 @@ def run_lassonet(X_train, y_train, X_test, y_test,
             'cv_folds': 5,
             'random_state': randomState,
             'method': 'lassonet'
+        },
+        
+        # Timing information
+        'execution_time': time.perf_counter() - start_time,
+        'timing': {
+            'total_seconds': time.perf_counter() - start_time,
+            'start_time': start_time,
+            'end_time': time.perf_counter()
         }
     }
     

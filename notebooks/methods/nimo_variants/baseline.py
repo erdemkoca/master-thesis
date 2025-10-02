@@ -11,6 +11,7 @@ import itertools
 import json
 import datetime
 import hashlib
+import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -612,6 +613,9 @@ def run_nimo_baseline(
       - Self-features default: disabled for paper compliance
     """
 
+    # Start timing
+    start_time = time.perf_counter()
+
     # Default self-features if not specified (disabled for paper compliance)
     if self_features is None:
         self_features = []
@@ -798,6 +802,10 @@ def run_nimo_baseline(
             "scale": [1.0] * len(beta_coeffs),
         }
 
+    # End timing
+    end_time = time.perf_counter()
+    execution_time = end_time - start_time
+
     result = {
         'model_name': 'NIMO_MLP',
         'iteration': iteration,
@@ -831,6 +839,14 @@ def run_nimo_baseline(
             'use_adaptive_l1': bool(use_adaptive_l1),
             'hard_threshold': float(hard_threshold),
             'trust_region': float(trust_region),
+        },
+        
+        # Timing information
+        'execution_time': execution_time,
+        'timing': {
+            'total_seconds': execution_time,
+            'start_time': start_time,
+            'end_time': end_time
         }
     }
     

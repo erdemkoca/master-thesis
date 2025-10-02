@@ -11,6 +11,7 @@ import sys
 import json
 import datetime
 import hashlib
+import time
 from pathlib import Path
 from dataclasses import dataclass, replace
 from typing import Optional, Tuple, List
@@ -496,6 +497,9 @@ def _train_single(
     artifact_dtype: str = "float32",
     cfg_label: Optional[str] = None,  # pass label when doing config search
 ):
+    # Start timing
+    start_time = time.perf_counter()
+    
     device = torch.device("cpu")
     torch.manual_seed(randomState)
     np.random.seed(randomState)
@@ -725,6 +729,10 @@ def _train_single(
 
     feature_names = list(X_columns) if X_columns is not None else [f"feature_{i}" for i in range(len(beta_raw))]
 
+    # End timing
+    end_time = time.perf_counter()
+    execution_time = end_time - start_time
+
     result = {
         "model_name": "NIMO_T",
         "iteration": iteration,
@@ -765,6 +773,14 @@ def _train_single(
             "use_correction_final": bool(use_correction_final),
         },
         "val_metrics": val_metrics,
+        
+        # Timing information
+        "execution_time": execution_time,
+        "timing": {
+            "total_seconds": execution_time,
+            "start_time": start_time,
+            "end_time": end_time
+        }
     }
 
     if g_corr_val is not None:

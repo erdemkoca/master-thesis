@@ -1,5 +1,6 @@
 import numpy as np
 import json
+import time
 from sklearn.linear_model import LogisticRegressionCV
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
@@ -13,6 +14,9 @@ def run_lasso(
     max_iter=5000, tol=1e-4,
     tau_report=0.0     # post-hoc |beta| threshold for reporting (applied in RAW space)
 ):
+    # Start timing
+    start_time = time.perf_counter()
+    
     # ---------------------------
     # 1) Standardize (fit on train only)
     # ---------------------------
@@ -75,6 +79,10 @@ def run_lasso(
     sel_mask = (np.abs(beta_for_sel) > eps).astype(int).tolist()
     selected = [name for name, c in zip(X_columns, beta_for_sel) if abs(c) > eps]
 
+    # End timing
+    end_time = time.perf_counter()
+    execution_time = end_time - start_time
+
     return {
         "model_name": "Lasso",
         "iteration": iteration,
@@ -114,5 +122,13 @@ def run_lasso(
             "C": float(clf.C_[0]),
             "penalty": "l1",
             "solver": "liblinear"
+        },
+        
+        # Timing information
+        "execution_time": execution_time,
+        "timing": {
+            "total_seconds": execution_time,
+            "start_time": start_time,
+            "end_time": end_time
         }
     }
