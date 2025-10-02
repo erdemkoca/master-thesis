@@ -162,6 +162,12 @@ class AdaptiveRidgeLogisticRegression(L.LightningModule):
         noise_std: float = 0.3,      # Increased for regularization
         lambda_reg: float = 3e-2,    # Increased ridge penalty for sparsity
         c_penalty: float = 0.1,      # Increased quadratic penalty on c
+        # L1 sparsity parameters
+        tau_l1: float = 2e-2,          # L1 soft-threshold (base)
+        tau_l1_max: float = 5e-2,      # Max L1 when using adaptive schedule
+        use_adaptive_l1: bool = True,  # Ramp tau_l1 over epochs/IRLS iters
+        hard_threshold: float = 1e-6,  # Set very small |beta_j| exactly to 0
+        trust_region: float = 1.0,     # Cap ||Δβ|| per epoch for stability
     ):
         super().__init__()
         # Disable automatic optimization for manual control
@@ -176,6 +182,13 @@ class AdaptiveRidgeLogisticRegression(L.LightningModule):
         self.noise_std = float(noise_std)
         self.lambda_reg = float(lambda_reg)
         self.c_penalty = float(c_penalty)
+        
+        # L1 sparsity parameters
+        self.tau_l1 = float(tau_l1)
+        self.tau_l1_max = float(tau_l1_max)
+        self.use_adaptive_l1 = bool(use_adaptive_l1)
+        self.hard_threshold = float(hard_threshold)
+        self.trust_region = float(trust_region)
 
         self.save_hyperparameters()
 
@@ -422,24 +435,48 @@ class AdaptiveRidgeLogisticRegression(L.LightningModule):
         self.manual_backward(total_profile_loss)
         opt.step()
         
-        # Update buffers for inspection/inference (optional)
+        # Update buffers with L1 proximal operator for sparsity
         with torch.no_grad():
             self.beta_0.copy_(gamma_full[0:1])
-            beta_new = self.c * gamma_full[1:]
-            
-            # Optional: Hard thresholding to mimic Transformer's behavior
-            # Set very small coefficients to exactly 0
-            hard_threshold = 1e-6
-            beta_new = torch.where(torch.abs(beta_new) < hard_threshold, 
-                                 torch.zeros_like(beta_new), beta_new)
-            
-            self.beta.copy_(beta_new.detach())
+            beta_candidate = (self.c * gamma_full[1:]).detach().clone()
+
+            # ---- Adaptive L1 schedule (optional) ----
+            # Use epoch index (self.current_epoch) to ramp tau_l1 towards tau_l1_max
+            if self.use_adaptive_l1:
+                # progress in [0,1]
+                T = max(1, self.trainer.max_epochs - 1)
+                progress = min(float(self.current_epoch) / float(T), 1.0)
+                tau = self.tau_l1 + (self.tau_l1_max - self.tau_l1) * progress
+            else:
+                tau = self.tau_l1
+
+            # ---- Soft-threshold (prox for L1) on beta_candidate ----
+            beta_np = beta_candidate.cpu().numpy()
+            beta_np = np.sign(beta_np) * np.maximum(np.abs(beta_np) - float(tau), 0.0)
+
+            # ---- Optional tiny hard threshold to get exact zeros ----
+            beta_np = np.where(np.abs(beta_np) < float(self.hard_threshold), 0.0, beta_np)
+
+            # ---- Trust-region step: limit ||Δβ||₂ (optional but stabilizing) ----
+            beta_prev = self.beta.detach().cpu().numpy()
+            delta = beta_np - beta_prev
+            dn = np.linalg.norm(delta)
+            if dn > float(self.trust_region):
+                beta_np = beta_prev + delta * (float(self.trust_region) / (dn + 1e-12))
+
+            # Write back
+            self.beta.copy_(torch.from_numpy(beta_np).to(self.beta.device, dtype=self.beta.dtype))
         
         # Logging
         self.log('profile_loss', total_profile_loss, on_epoch=True, prog_bar=True)
         self.log('beta_0', self.beta_0, on_epoch=True, prog_bar=True)
         self.log('alpha2', self.alpha2, on_epoch=True, prog_bar=True)
         self.log('c_mean', c_vals.mean(), on_epoch=True, prog_bar=True)
+        
+        # Monitor sparsity
+        nz = int((np.abs(beta_np) > 0).sum())
+        self.log('beta_n_nonzero', float(nz), on_epoch=True, prog_bar=True)
+        self.log('tau_current', float(tau), on_epoch=True, prog_bar=False)
 
     # -------- eval / predict --------
 
@@ -501,6 +538,12 @@ def run_nimo_baseline(
     noise_std: float = 0.3,       # Increased for regularization
     lambda_reg: float = 3e-2,     # Increased ridge penalty for sparsity
     c_penalty: float = 0.1,       # Increased quadratic penalty on c
+    # L1 sparsity parameters
+    tau_l1: float = 2e-2,          # L1 soft-threshold (base)
+    tau_l1_max: float = 5e-2,      # Max L1 when using adaptive schedule
+    use_adaptive_l1: bool = True,  # Ramp tau_l1 over epochs/IRLS iters
+    hard_threshold: float = 1e-6,  # Set very small |beta_j| exactly to 0
+    trust_region: float = 1.0,     # Cap ||Δβ|| per epoch for stability
 ) -> Dict[str, Any]:
     """
     Train one NIMO config and evaluate. Returns standardized dict with metrics.
@@ -570,6 +613,11 @@ def run_nimo_baseline(
         noise_std=noise_std,
         lambda_reg=lambda_reg,
         c_penalty=c_penalty,
+        tau_l1=tau_l1,
+        tau_l1_max=tau_l1_max,
+        use_adaptive_l1=use_adaptive_l1,
+        hard_threshold=hard_threshold,
+        trust_region=trust_region,
     )
     
     # Update CO mask if self-features were used
@@ -717,6 +765,11 @@ def run_nimo_baseline(
             'noise_std': float(noise_std),
             'lambda_reg': float(lambda_reg),
             'c_penalty': float(c_penalty),
+            'tau_l1': float(tau_l1),
+            'tau_l1_max': float(tau_l1_max),
+            'use_adaptive_l1': bool(use_adaptive_l1),
+            'hard_threshold': float(hard_threshold),
+            'trust_region': float(trust_region),
         }
     }
     return standardize_method_output(result)
@@ -739,6 +792,12 @@ def run_nimo_grid(
     self_features: Optional[List[str]] = None,   # default enabled below
     early_stop_patience: Optional[int] = 8,
     noise_std: float = 0.2,
+    # L1 sparsity parameters
+    tau_l1: float = 2e-2,
+    tau_l1_max: float = 5e-2,
+    use_adaptive_l1: bool = True,
+    hard_threshold: float = 1e-6,
+    trust_region: float = 1.0,
 ) -> Dict[str, Any]:
     """
     Fair hyperparameter sweep for NIMO, selecting by validation F1 with threshold search.
@@ -761,6 +820,8 @@ def run_nimo_grid(
             "lambda_reg": [1e-2, 3e-2, 1e-1],  # Higher ridge penalties
             "c_penalty": [3e-2, 1e-1, 3e-1],   # Higher c penalties
             "noise_std": [0.2, 0.3],           # Include noise for regularization
+            "tau_l1": [1e-2, 2e-2, 5e-2],      # L1 sparsity thresholds
+            "tau_l1_max": [3e-2, 5e-2, 1e-1],  # Max L1 thresholds
         }
 
     keys = list(grid.keys())
@@ -791,6 +852,11 @@ def run_nimo_grid(
             noise_std=h.get("noise_std", 0.3),
             lambda_reg=h.get("lambda_reg", 3e-2),
             c_penalty=h.get("c_penalty", 0.1),
+            tau_l1=h.get("tau_l1", tau_l1),
+            tau_l1_max=h.get("tau_l1_max", tau_l1_max),
+            use_adaptive_l1=use_adaptive_l1,
+            hard_threshold=hard_threshold,
+            trust_region=trust_region,
         )
 
         res['trial_hparams'] = h
