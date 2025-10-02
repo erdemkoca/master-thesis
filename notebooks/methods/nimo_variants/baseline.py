@@ -8,6 +8,10 @@ import os
 import sys
 import math
 import itertools
+import json
+import datetime
+import hashlib
+from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
 import numpy as np
@@ -41,6 +45,53 @@ except Exception:
                 out[k] = v
         return out
 
+
+# -------------------- artifact helpers --------------------
+
+def _short_hash(obj: dict) -> str:
+    data = json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha1(data).hexdigest()[:10]
+
+def _mlp_key(scenario, seed, input_dim, hparams, tag=None):
+    hp_compact = {k: hparams.get(k) for k in sorted(hparams.keys())}
+    return {
+        "scenario": scenario or "unknown",
+        "seed": int(seed),
+        "input_dim": int(input_dim),
+        "h": _short_hash(hp_compact),
+        "tag": tag or "default",
+    }
+
+def _mlp_paths(base_dir: str, key: dict) -> dict:
+    root = Path(base_dir) / key["scenario"] / f"seed{key['seed']}" / f"in{key['input_dim']}" / key["h"]
+    if key["tag"] != "default":
+        root = root / key["tag"]
+    root.mkdir(parents=True, exist_ok=True)
+    return {
+        "root": root,
+        "weights_npz": root / "mlp_weights.npz",
+        "meta_json": root / "meta.json",
+    }
+
+def _load_mlp_artifacts(paths: dict):
+    if not (paths["weights_npz"].exists() and paths["meta_json"].exists()):
+        return None
+    try:
+        with open(paths["meta_json"], "r") as f:
+            meta = json.load(f)
+        npz = np.load(paths["weights_npz"])
+        fc1_weight = npz["fc1_weight"]
+        input_dim = int(npz["input_dim"])
+        n_bits = int(npz["n_bits"])
+        return {"meta": meta, "fc1_weight": fc1_weight, "input_dim": input_dim, "n_bits": n_bits}
+    except Exception:
+        return None
+
+def _save_mlp_artifacts(fc1_weight: np.ndarray, meta: dict, paths: dict, dtype: str = "float32"):
+    fc1 = fc1_weight.astype(np.float32 if dtype == "float32" else np.float64, copy=False)
+    np.savez_compressed(paths["weights_npz"], fc1_weight=fc1, input_dim=meta["input_dim"], n_bits=meta["n_bits"])
+    with open(paths["meta_json"], "w") as f:
+        json.dump(meta, f, separators=(",", ":"), sort_keys=True)
 
 # -------------------- helpers --------------------
 
@@ -544,6 +595,16 @@ def run_nimo_baseline(
     use_adaptive_l1: bool = True,  # Ramp tau_l1 over epochs/IRLS iters
     hard_threshold: float = 1e-6,  # Set very small |beta_j| exactly to 0
     trust_region: float = 1.0,     # Cap ||Δβ|| per epoch for stability
+    # Weight extraction parameters
+    return_model_bits: bool = False,  # Return model weights for plotting
+    # Artifact saving parameters
+    artifact_dir: str = "artifacts/nimo_mlp",
+    artifact_tag: Optional[str] = None,      # optional string to distinguish runs
+    scenario_name: Optional[str] = None,     # pass-through from pipeline
+    save_artifacts: bool = False,            # default off; pipeline enables
+    save_if: str = "better",                 # {"better","always"}
+    cache_policy: str = "reuse",             # {"reuse","overwrite","ignore"}
+    artifact_dtype: str = "float32",         # {"float32","float64"}
 ) -> Dict[str, Any]:
     """
     Train one NIMO config and evaluate. Returns standardized dict with metrics.
@@ -772,6 +833,65 @@ def run_nimo_baseline(
             'trust_region': float(trust_region),
         }
     }
+    
+    # Add model weights for plotting if requested
+    if return_model_bits:
+        result['_plot_bits'] = {
+            'fc1_weight': model.fc1.weight.detach().cpu().numpy(),
+            'input_dim': int(model.input_dim),
+            'n_bits': int(model.n_bits),
+        }
+    
+    # Artifact saving logic
+    if save_artifacts:
+        key = _mlp_key(
+            scenario=scenario_name,
+            seed=randomState,
+            input_dim=int(model.input_dim),
+            hparams=result["hyperparams"],
+            tag=artifact_tag,
+        )
+        paths = _mlp_paths(artifact_dir, key)
+
+        # decide: reuse/overwrite/ignore + always/better
+        existing = _load_mlp_artifacts(paths) if cache_policy in ("reuse",) else None
+        run_f1 = float(result.get("f1", 0.0))
+
+        should_save = False
+        if cache_policy == "ignore":
+            should_save = False
+        elif cache_policy == "overwrite":
+            should_save = True
+        else:  # reuse
+            if existing is None:
+                should_save = True
+            elif save_if == "always":
+                should_save = True
+            else:  # "better"
+                prev_f1 = float(existing["meta"].get("f1", -1.0))
+                should_save = run_f1 > prev_f1
+
+        if should_save:
+            meta = {
+                "scenario": scenario_name or "unknown",
+                "model_type": "NIMO_MLP",
+                "random_seed": int(randomState),
+                "input_dim": int(model.input_dim),
+                "n_bits": int(model.n_bits),
+                "f1": run_f1,
+                "accuracy": float(result.get("accuracy", 0.0)),
+                "created_utc": datetime.datetime.utcnow().isoformat() + "Z",
+                "hyperparams": result["hyperparams"],
+            }
+            _save_mlp_artifacts(
+                fc1_weight=model.fc1.weight.detach().cpu().numpy(),
+                meta=meta,
+                paths=paths,
+                dtype=artifact_dtype,
+            )
+            # optionally expose a small hook for plotting code:
+            result["_artifact_paths"] = {k: str(v) for k, v in paths.items()}
+    
     return standardize_method_output(result)
 
 

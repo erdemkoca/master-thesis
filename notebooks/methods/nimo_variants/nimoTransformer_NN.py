@@ -8,6 +8,10 @@ from __future__ import annotations
 
 import os
 import sys
+import json
+import datetime
+import hashlib
+from pathlib import Path
 from dataclasses import dataclass, replace
 from typing import Optional, Tuple, List
 
@@ -33,6 +37,71 @@ except ImportError:  # pragma: no cover - fallback for ad-hoc execution
             else:
                 out[k] = v
         return out
+
+
+# ---- artifact helpers (Transformer) ----
+
+def _short_hash(obj: dict) -> str:
+    data = json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha1(data).hexdigest()[:10]
+
+def _t_key(scenario, seed, input_dim, hparams, tag=None, cfg_label=None):
+    hp_compact = {k: hparams.get(k) for k in sorted(hparams.keys())}
+    key = {
+        "scenario": scenario or "unknown",
+        "seed": int(seed),
+        "input_dim": int(input_dim),
+        "h": _short_hash(hp_compact),
+        "tag": tag or "default",
+    }
+    if cfg_label is not None:
+        key["cfg"] = cfg_label
+    return key
+
+def _t_paths(base_dir: str, key: dict) -> dict:
+    # artifacts/nimo_transformer/<scenario>/seed<seed>/in<input_dim>/<h>[/<tag>][/cfg_<label>]
+    root = Path(base_dir) / key["scenario"] / f"seed{key['seed']}" / f"in{key['input_dim']}" / key["h"]
+    if key.get("tag") and key["tag"] != "default":
+        root = root / key["tag"]
+    if key.get("cfg"):
+        root = root / f"cfg_{key['cfg']}"
+    root.mkdir(parents=True, exist_ok=True)
+    return {
+        "root": root,
+        "weights_npz": root / "transformer_weights.npz",
+        "meta_json": root / "meta.json",
+    }
+
+def _load_t_artifacts(paths: dict):
+    if not (paths["weights_npz"].exists() and paths["meta_json"].exists()):
+        return None
+    try:
+        with open(paths["meta_json"], "r") as f:
+            meta = json.load(f)
+        npz = np.load(paths["weights_npz"])
+        out = {
+            "meta": meta,
+            "_plot_bits": {
+                "feature_embed": npz["feature_embed"],
+                "binary_proj_weight": (None if "binary_proj_weight" not in npz.files else npz["binary_proj_weight"]),
+                "binary_codes": (None if "binary_codes" not in npz.files else npz["binary_codes"]),
+                "cls_token": npz["cls_token"],
+                "corr_head_last_weight": npz["corr_head_last_weight"],
+                "corr_head_last_bias": npz["corr_head_last_bias"],
+                "residual_head_last_weight": npz["residual_head_last_weight"],
+                "residual_head_last_bias": npz["residual_head_last_bias"],
+            }
+        }
+        return out
+    except Exception:
+        return None
+
+def _save_t_artifacts(arrs: dict, meta: dict, paths: dict, dtype: str = "float32"):
+    to_dtype = np.float32 if dtype == "float32" else np.float64
+    safe = {k: (None if v is None else v.astype(to_dtype, copy=False)) for k, v in arrs.items()}
+    np.savez_compressed(paths["weights_npz"], **{k: v for k, v in safe.items() if v is not None})
+    with open(paths["meta_json"], "w") as f:
+        json.dump(meta, f, separators=(",", ":"), sort_keys=True)
 
 
 def _binary_code(index: int, n_bits: int) -> np.ndarray:
@@ -416,6 +485,16 @@ def _train_single(
     X_columns,
     X_val: Optional[np.ndarray],
     y_val: Optional[np.ndarray],
+    return_model_bits: bool = False,
+    # NEW:
+    save_artifacts: bool = False,
+    artifact_dir: str = "artifacts/nimo_transformer",
+    scenario_name: Optional[str] = None,
+    artifact_tag: Optional[str] = None,
+    save_if: str = "better",
+    cache_policy: str = "reuse",
+    artifact_dtype: str = "float32",
+    cfg_label: Optional[str] = None,  # pass label when doing config search
 ):
     device = torch.device("cpu")
     torch.manual_seed(randomState)
@@ -696,6 +775,91 @@ def _train_single(
             }
         )
 
+    # ---- artifact save (only if requested) ----
+    if save_artifacts:
+        key = _t_key(
+            scenario=scenario_name,
+            seed=randomState,
+            input_dim=int(d),
+            hparams=result["hyperparams"],
+            tag=artifact_tag,
+            cfg_label=cfg_label,
+        )
+        paths = _t_paths(artifact_dir, key)
+        existing = _load_t_artifacts(paths) if cache_policy in ("reuse",) else None
+
+        run_f1 = float(result.get("f1", 0.0))
+        should_save = False
+        if cache_policy == "ignore":
+            should_save = False
+        elif cache_policy == "overwrite":
+            should_save = True
+        else:  # reuse
+            if existing is None:
+                should_save = True
+            elif save_if == "always":
+                should_save = True
+            else:  # better
+                prev_f1 = float(existing["meta"].get("f1", -1.0))
+                should_save = run_f1 > prev_f1
+
+        if should_save:
+            # collect minimal arrays needed for plotting
+            corr_last: nn.Linear = model.correction_net.corr_head[-1]
+            res_last: nn.Linear = model.correction_net.residual_head[-1]
+
+            arrs = {
+                "feature_embed": model.correction_net.feature_embed.detach().cpu().numpy(),
+                "binary_proj_weight": (
+                    None if model.correction_net.binary_proj is None
+                    else model.correction_net.binary_proj.weight.detach().cpu().numpy()
+                ),
+                "binary_codes": (
+                    None if model.correction_net.binary_codes is None
+                    else model.correction_net.binary_codes.detach().cpu().numpy()
+                ),
+                "cls_token": model.correction_net.cls_token.detach().cpu().numpy(),
+                "corr_head_last_weight": corr_last.weight.detach().cpu().numpy(),
+                "corr_head_last_bias": corr_last.bias.detach().cpu().numpy(),
+                "residual_head_last_weight": res_last.weight.detach().cpu().numpy(),
+                "residual_head_last_bias": res_last.bias.detach().cpu().numpy(),
+            }
+
+            meta = {
+                "scenario": scenario_name or "unknown",
+                "model_type": "NIMO_T",
+                "random_seed": int(randomState),
+                "input_dim": int(d),
+                "embed_dim": int(cfg.embed_dim),
+                "num_heads": int(cfg.num_heads),
+                "num_layers": int(cfg.num_layers),
+                "use_binary_context": bool(cfg.use_binary_context),
+                "f1": run_f1,
+                "accuracy": float(result.get("accuracy", 0.0)),
+                "created_utc": datetime.datetime.utcnow().isoformat() + "Z",
+                "hyperparams": result["hyperparams"],
+                "config_label": cfg_label,
+            }
+
+            _save_t_artifacts(arrs, meta, paths, dtype=artifact_dtype)
+            result["_artifact_paths"] = {k: str(v) for k, v in paths.items()}
+
+    # Add model weights for plotting if requested
+    if return_model_bits:
+        result["_plot_bits"] = {
+            "feature_embed": model.correction_net.feature_embed.detach().cpu().numpy(),
+            "binary_proj_weight": (
+                None if model.correction_net.binary_proj is None
+                else model.correction_net.binary_proj.weight.detach().cpu().numpy()
+            ),
+            "binary_codes": (
+                None if model.correction_net.binary_codes is None
+                else model.correction_net.binary_codes.detach().cpu().numpy()
+            ),
+        }
+        # Also store the model for activation-based analysis
+        result["model"] = model
+
     return standardize_method_output(result), val_metrics
 
 
@@ -708,6 +872,15 @@ def run_nimo(
     config: Optional[TrainingConfig] = None,
     config_search: Optional[List[Tuple[str, TrainingConfig]]] = None,
     return_all: bool = False,
+    return_model_bits: bool = False,
+    # Artifact saving parameters
+    save_artifacts: bool = False,
+    artifact_dir: str = "artifacts/nimo_transformer",
+    scenario_name: Optional[str] = None,
+    artifact_tag: Optional[str] = None,
+    save_if: str = "better",
+    cache_policy: str = "reuse",
+    artifact_dtype: str = "float32",
 ):
     """Run transformer-based NIMO with optional hyperparameter search."""
 
@@ -731,6 +904,15 @@ def run_nimo(
             X_columns=X_columns,
             X_val=X_val,
             y_val=y_val,
+            return_model_bits=return_model_bits,
+            save_artifacts=save_artifacts,
+            artifact_dir=artifact_dir,
+            scenario_name=scenario_name,
+            artifact_tag=artifact_tag,
+            save_if=save_if,
+            cache_policy=cache_policy,
+            artifact_dtype=artifact_dtype,
+            cfg_label="provided",
         )
         candidate_summary = [{
             "label": "provided",
@@ -763,6 +945,15 @@ def run_nimo(
                 X_columns=X_columns,
                 X_val=X_val,
                 y_val=y_val,
+                return_model_bits=return_model_bits,
+                save_artifacts=save_artifacts,
+                artifact_dir=artifact_dir,
+                scenario_name=scenario_name,
+                artifact_tag=artifact_tag,
+                save_if=save_if,
+                cache_policy=cache_policy,
+                artifact_dtype=artifact_dtype,
+                cfg_label=label,
             )
             err_msg = None
         except Exception as exc:

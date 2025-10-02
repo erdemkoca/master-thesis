@@ -118,14 +118,41 @@ def run_all_methods(X_tr, y_tr, X_va, y_va, X_te, y_te, seed, feature_names, dat
             start_time = time.time()
 
             # Run method with consistent interface
-            result = method_func(
-                X_tr, y_tr, X_te, y_te,
-                iteration=0,  # Will be set by caller
-                randomState=seed,
-                X_columns=feature_names,
-                X_val=X_va,
-                y_val=y_va
-            )
+            if method_name == "NIMO_MLP":
+                result = method_func(
+                    X_tr, y_tr, X_te, y_te,
+                    iteration=0,  # Will be set by caller
+                    randomState=seed,
+                    X_columns=feature_names,
+                    X_val=X_va,
+                    y_val=y_va,
+                    save_artifacts=True,
+                    scenario_name=dataset_info.get("scenario", "unknown"),
+                    save_if="better",
+                    cache_policy="reuse"
+                )
+            elif method_name == "NIMO_T":
+                result = method_func(
+                    X_tr, y_tr, X_te, y_te,
+                    iteration=0,  # Will be set by caller
+                    randomState=seed,
+                    X_columns=feature_names,
+                    X_val=X_va,
+                    y_val=y_va,
+                    save_artifacts=True,
+                    scenario_name=dataset_info.get("scenario", "unknown"),
+                    save_if="better",
+                    cache_policy="reuse"
+                )
+            else:
+                result = method_func(
+                    X_tr, y_tr, X_te, y_te,
+                    iteration=0,  # Will be set by caller
+                    randomState=seed,
+                    X_columns=feature_names,
+                    X_val=X_va,
+                    y_val=y_va
+                )
 
             # Add timing info
             result["training_time"] = time.time() - start_time
@@ -165,6 +192,10 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/syntheti
         n_train: Number of training samples per iteration
         n_val: Number of validation samples per iteration
     """
+    # Record pipeline start time
+    pipeline_start_time = time.time()
+    pipeline_start_datetime = datetime.now()
+    
     # Default rebalancing config
     if rebalance_config is None:
         rebalance_config = {"mode": "undersample", "target_pos": 0.5}
@@ -175,6 +206,7 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/syntheti
     print("=" * 80)
     print("SYNTHETIC EXPERIMENT RUNNER")
     print("=" * 80)
+    print(f"Pipeline started at: {pipeline_start_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Datasets: {len(all_datasets)} (synthetic only)")
     print(f"Iterations per dataset: {n_iterations}")
     print(f"Sample sizes: {n_train} train, {n_val} val")
@@ -301,6 +333,12 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/syntheti
             print(f"✗ Error loading dataset {entry['id']}: {e}")
             continue
 
+    # Record pipeline end time and calculate duration
+    pipeline_end_time = time.time()
+    pipeline_end_datetime = datetime.now()
+    pipeline_duration_seconds = pipeline_end_time - pipeline_start_time
+    pipeline_duration_minutes = pipeline_duration_seconds / 60
+
     # Save results
     df = pd.DataFrame(all_results)
     output_file = os.path.join(output_dir, "experiment_results.csv")
@@ -309,6 +347,10 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/syntheti
     # Save metadata
     metadata = {
         "timestamp": datetime.now().isoformat(),
+        "pipeline_start_time": pipeline_start_datetime.isoformat(),
+        "pipeline_end_time": pipeline_end_datetime.isoformat(),
+        "pipeline_duration_seconds": pipeline_duration_seconds,
+        "pipeline_duration_minutes": pipeline_duration_minutes,
         "n_iterations": n_iterations,
         "rebalance_config": rebalance_config,
         "n_datasets": len(all_datasets),
@@ -324,10 +366,12 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/syntheti
     print("\n" + "=" * 80)
     print("SYNTHETIC EXPERIMENT SUMMARY")
     print("=" * 80)
+    print(f"Pipeline started at: {pipeline_start_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Pipeline finished at: {pipeline_end_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Pipeline duration: {pipeline_duration_minutes:.2f} minutes ({pipeline_duration_seconds:.1f} seconds)")
     print(f"Total results: {len(all_results)}")
     print(f"Datasets processed: {len(all_datasets)}")
     print(f"Iterations per dataset: {n_iterations}")
-    print(f"Total time: {time.time() - start_time:.1f} seconds")
     print(f"Results saved to: {output_file}")
 
     # Print per-dataset summary
@@ -357,9 +401,10 @@ def main(n_iterations=30, rebalance_config=None, output_dir="../results/syntheti
         print(f"  {method_name}: {n_success}/{n_total} successful runs, avg F1: {avg_f1:.3f}")
 
     print(f"\n✓ Synthetic experiment completed successfully!")
+    print(f"✓ Total pipeline time: {pipeline_duration_minutes:.2f} minutes")
     return df
 
 
 if __name__ == "__main__":
     # Run with default settings
-    df = main(n_iterations=10, n_train=1400, n_val=600)  # Start with 1 iteration for testing 10:14
+    df = main(n_iterations=1, n_train=1400, n_val=600)  # Start with 1 iteration for testing 10:14
