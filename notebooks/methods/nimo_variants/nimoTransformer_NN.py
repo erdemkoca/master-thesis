@@ -345,8 +345,8 @@ def update_beta_irls(
 @dataclass
 class TrainingConfig:
     # Core transformer parameters (optimized defaults)
-    embed_dim: int = 48  # Reduced from 64 for speed
-    num_heads: int = 3   # Reduced from 4 for speed
+    embed_dim: int = 64
+    num_heads: int = 4
     num_layers: int = 2
     dropout: float = 0.1
     out_scale: float = 0.4
@@ -364,12 +364,12 @@ class TrainingConfig:
     # Training parameters (optimized defaults)
     lr: float = 1e-3
     weight_decay: float = 1e-4
-    T: int = 15  # Reduced from 25 for speed
-    nn_steps: int = 1
-    warm_start_steps: int = 1  # Reduced from 3 for speed
+    T: int = 30
+    nn_steps: int = 2
+    warm_start_steps: int = 3
     
     # IRLS optimization parameters
-    irls_cached_batch_size: int = 1024  # Cache batch size for IRLS
+    irls_cached_batch_size: int = 0  # 0/None => full-data IRLS
     irls_max_iter: int = 10  # Reduced from 25 for speed
     
     # Residual head optimization
@@ -552,6 +552,15 @@ def _train_single(
 ):
     # Start timing
     start_time = time.perf_counter()
+    
+    # Sanity check for configuration
+    print("CFG sanity:",
+          "embed_dim", cfg.embed_dim,
+          "num_heads", cfg.num_heads,
+          "T", cfg.T,
+          "nn_steps", cfg.nn_steps,
+          "warm_start_steps", cfg.warm_start_steps,
+          "irls_cached_batch_size", cfg.irls_cached_batch_size)
     
     # GPU + AMP optimization
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
