@@ -156,12 +156,12 @@ class AdaptiveRidgeLogisticRegression(L.LightningModule):
         input_dim: int,
         output_dim: int = 1,
         learning_rate: float = 3e-4,
-        group_penalty: float = 1.0,
-        dropout: float = 0.0,
+        group_penalty: float = 3.0,  # Increased for more sparsity
+        dropout: float = 0.1,        # Increased for regularization
         hidden_dim: Optional[int] = None,
-        noise_std: float = 0.2,
-        lambda_reg: float = 1e-3,  # Explicit λ regularization
-        c_penalty: float = 0.01,   # Quadratic penalty on c
+        noise_std: float = 0.3,      # Increased for regularization
+        lambda_reg: float = 3e-2,    # Increased ridge penalty for sparsity
+        c_penalty: float = 0.1,      # Increased quadratic penalty on c
     ):
         super().__init__()
         # Disable automatic optimization for manual control
@@ -201,10 +201,10 @@ class AdaptiveRidgeLogisticRegression(L.LightningModule):
         # Store mapping for self-features (if any)
         self.self_feature_mapping = []
 
-        # MLP definition
+        # MLP definition (reduced capacity for more sparsity)
         in1 = self.input_dim + self.n_bits
-        h1 = hidden_dim if hidden_dim is not None else 64
-        h2 = hidden_dim if hidden_dim is not None else 128
+        h1 = hidden_dim if hidden_dim is not None else 64  # Reduced from 128
+        h2 = hidden_dim if hidden_dim is not None else 64  # Reduced from 128
 
         self.fc1 = nn.Linear(in1, h1)
         self.fc2 = nn.Linear(h1 + self.n_bits, h2)
@@ -425,7 +425,15 @@ class AdaptiveRidgeLogisticRegression(L.LightningModule):
         # Update buffers for inspection/inference (optional)
         with torch.no_grad():
             self.beta_0.copy_(gamma_full[0:1])
-            self.beta.copy_((self.c * gamma_full[1:]).detach())
+            beta_new = self.c * gamma_full[1:]
+            
+            # Optional: Hard thresholding to mimic Transformer's behavior
+            # Set very small coefficients to exactly 0
+            hard_threshold = 1e-6
+            beta_new = torch.where(torch.abs(beta_new) < hard_threshold, 
+                                 torch.zeros_like(beta_new), beta_new)
+            
+            self.beta.copy_(beta_new.detach())
         
         # Logging
         self.log('profile_loss', total_profile_loss, on_epoch=True, prog_bar=True)
@@ -480,19 +488,19 @@ def run_nimo_baseline(
     X_columns: Optional[List[str]] = None,
     *,
     X_val=None, y_val=None,
-    max_epochs: int = 1000,
+    max_epochs: int = 150,        # Increased for shrinkage to settle
     batch_size: int = 64,
     learning_rate: float = 3e-4,
-    group_penalty: float = 1.0,
-    dropout: float = 0.0,
+    group_penalty: float = 3.0,   # Increased for more sparsity
+    dropout: float = 0.1,         # Increased for regularization
     hidden_dim: Optional[int] = None,
     standardize: bool = True,
     num_workers: int = 0,
     self_features: Optional[List[str]] = None,   # default disabled for paper compliance
     early_stop_patience: Optional[int] = 10,
-    noise_std: float = 0.2,
-    lambda_reg: float = 1e-3,
-    c_penalty: float = 0.01,
+    noise_std: float = 0.3,       # Increased for regularization
+    lambda_reg: float = 3e-2,     # Increased ridge penalty for sparsity
+    c_penalty: float = 0.1,       # Increased quadratic penalty on c
 ) -> Dict[str, Any]:
     """
     Train one NIMO config and evaluate. Returns standardized dict with metrics.
@@ -602,28 +610,84 @@ def run_nimo_baseline(
     f1 = float(f1_score(y_test_np, y_pred, zero_division=0))
     acc = float((y_pred == y_test_np).mean())
 
-    # Final feature selection from beta
+    # Final feature selection from beta (stricter threshold for sparsity)
     beta_coeffs = model.beta.detach().cpu().numpy()
     beta_0 = model.beta_0.detach().cpu().numpy().item()
-    beta_threshold = 0.01
+    beta_threshold = 0.05  # Increased from 0.01 for more comparable sparsity to Transformer
+    
+    # Convert to raw space for feature selection (consistent with coefficient reporting)
+    if standardize:
+        Xtr_original = np.asarray(X_train, dtype=np.float32)
+        if self_features:
+            Xtr_original, _ = add_self_features(Xtr_original, self_features)
+        std_original = Xtr_original.std(axis=0)
+        std_original[std_original == 0.0] = 1.0
+        
+        # EFFECTIVE raw-space coefficients (recommended for plots)
+        # Report β directly (the effective coefficients that multiply standardized features)
+        # Do NOT divide by c_vals - that would explode values when c_i is small
+        beta_coeffs_raw = beta_coeffs / std_original  # Convert from standardized to raw space
+    else:
+        beta_coeffs_raw = beta_coeffs
+    
     if X_columns is not None and len(X_columns) == model.input_dim:
-        selected_features = [X_columns[i] for i, b in enumerate(beta_coeffs) if abs(b) > beta_threshold]
+        selected_features = [X_columns[i] for i, b in enumerate(beta_coeffs_raw) if abs(b) > beta_threshold]
         feature_names = X_columns
     else:
-        selected_features = [i for i, b in enumerate(beta_coeffs) if abs(b) > beta_threshold]
-        feature_names = [f"feature_{i}" for i in range(len(beta_coeffs))]
+        selected_features = [i for i, b in enumerate(beta_coeffs_raw) if abs(b) > beta_threshold]
+        feature_names = [f"feature_{i}" for i in range(len(beta_coeffs_raw))]
 
-    # Store coefficients in the same format as other methods
-    coefficients_data = {
-        "space": "standardized",
-        "intercept": float(beta_0),
-        "values": beta_coeffs.tolist(),
-        "values_no_threshold": beta_coeffs.tolist(),
-        "feature_names": feature_names,
-        "coef_threshold_applied": float(beta_threshold),
-        "mean": [0.0] * len(beta_coeffs),  # Assuming standardized data
-        "scale": [1.0] * len(beta_coeffs),  # Assuming standardized data
-    }
+    # Convert coefficients back to raw space (like NIMO Transformer does)
+    if standardize:
+        # Get the actual scaling parameters used during standardization
+        mean_actual = Xtr_np.mean(axis=0)  # This will be close to 0 due to standardization
+        std_actual = Xtr_np.std(axis=0)    # This will be close to 1 due to standardization
+        
+        # But we need the original scaling parameters
+        # Recalculate them from the original data before standardization
+        Xtr_original = np.asarray(X_train, dtype=np.float32)
+        if self_features:
+            Xtr_original, _ = add_self_features(Xtr_original, self_features)
+        mean_original = Xtr_original.mean(axis=0)
+        std_original = Xtr_original.std(axis=0)
+        std_original[std_original == 0.0] = 1.0
+        
+        # EFFECTIVE raw-space coefficients (recommended for plots)
+        # Report β directly (the effective coefficients that multiply standardized features)
+        # Do NOT divide by c_vals - that would explode values when c_i is small
+        beta_raw = beta_coeffs / std_original  # Convert from standardized to raw space
+        b0_raw = beta_0 - float(np.dot(beta_raw, mean_original))
+        
+        # Optional: Γ (pre-c) for diagnostics only (can be huge if c_i is small)
+        c_vals = model.c.detach().cpu().numpy()
+        gamma_std = beta_coeffs / c_vals
+        gamma_raw = gamma_std / std_original
+        
+        coefficients_data = {
+            "space": "raw",
+            "intercept": float(b0_raw),
+            "values": beta_raw.tolist(),  # Effective coefficients β (recommended for plots)
+            "values_no_threshold": beta_raw.tolist(),
+            "feature_names": feature_names,
+            "coef_threshold_applied": float(beta_threshold),
+            "mean": mean_original.tolist(),
+            "scale": std_original.tolist(),
+            # Optional diagnostics (can be huge if c_i is small)
+            "gamma_raw": gamma_raw.tolist(),  # Pre-c coefficients γ
+            "c_values": c_vals.tolist(),  # c scaling factors
+        }
+    else:
+        # No standardization was applied
+        coefficients_data = {
+            "space": "raw",
+            "intercept": float(beta_0),
+            "values": beta_coeffs.tolist(),
+            "values_no_threshold": beta_coeffs.tolist(),
+            "feature_names": feature_names,
+            "coef_threshold_applied": float(beta_threshold),
+            "mean": [0.0] * len(beta_coeffs),
+            "scale": [1.0] * len(beta_coeffs),
+        }
 
     result = {
         'model_name': 'NIMO_MLP',
@@ -638,7 +702,7 @@ def run_nimo_baseline(
         'selected_features': selected_features,
         'n_selected': len(selected_features),
         'selection': {
-            'mask': [1 if abs(b) > beta_threshold else 0 for b in beta_coeffs],
+            'mask': [1 if abs(b) > beta_threshold else 0 for b in beta_coeffs_raw],
             'features': selected_features
         },
         'hyperparams': {
@@ -687,15 +751,16 @@ def run_nimo_grid(
     if self_features is None:
         self_features = []
 
-    # Default grid aligned with NIMO paper parameters
+    # Default grid aligned with sparse NIMO parameters
     if grid is None:
         grid = {
             "learning_rate": [1e-3, 3e-4],
-            "group_penalty": [0.1, 0.3, 1.0, 3.0],
-            "dropout": [0.0, 0.2, 0.5],
-            "hidden_dim": [64, 128, 256],
-            "lambda_reg": [1e-4, 1e-3, 1e-2],
-            "c_penalty": [1e-3, 1e-2, 1e-1],
+            "group_penalty": [1.0, 3.0, 5.0],  # Focus on higher values for sparsity
+            "dropout": [0.0, 0.1, 0.2],        # Include 0.1 for regularization
+            "hidden_dim": [64, 96],             # Reduced capacity
+            "lambda_reg": [1e-2, 3e-2, 1e-1],  # Higher ridge penalties
+            "c_penalty": [3e-2, 1e-1, 3e-1],   # Higher c penalties
+            "noise_std": [0.2, 0.3],           # Include noise for regularization
         }
 
     keys = list(grid.keys())
@@ -716,16 +781,16 @@ def run_nimo_grid(
             max_epochs=max_epochs,
             batch_size=batch_size,
             learning_rate=h.get("learning_rate", 3e-4),
-            group_penalty=h.get("group_penalty", 1.0),
-            dropout=h.get("dropout", 0.0),
+            group_penalty=h.get("group_penalty", 3.0),
+            dropout=h.get("dropout", 0.1),
             hidden_dim=h.get("hidden_dim", None),
             standardize=standardize,
             num_workers=num_workers,
             self_features=self_features,         # default disabled
             early_stop_patience=early_stop_patience,
-            noise_std=noise_std,
-            lambda_reg=h.get("lambda_reg", 1e-3),
-            c_penalty=h.get("c_penalty", 0.01),
+            noise_std=h.get("noise_std", 0.3),
+            lambda_reg=h.get("lambda_reg", 3e-2),
+            c_penalty=h.get("c_penalty", 0.1),
         )
 
         res['trial_hparams'] = h
